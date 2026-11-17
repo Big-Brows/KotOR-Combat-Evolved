@@ -1,0 +1,25 @@
+# Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
+cmake_minimum_required(VERSION 3.21)
+cmake_policy(SET CMP0141 NEW)
+set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "")
+project(KotOR_CE_Launcher LANGUAGES CXX RC)
+if(NOT MSVC)
+  message(FATAL_ERROR "Build with the installed Visual Studio x64 tools")
+endif()
+add_executable(KotOR-CE WIN32 launcher.cpp setup.cpp branding.rc ../macos/gamedirs.cpp)
+target_compile_features(KotOR-CE PRIVATE cxx_std_17)
+target_compile_definitions(KotOR-CE PRIVATE _CRT_SECURE_NO_WARNINGS strcasecmp=_stricmp
+  _WIN32_WINNT=0x0A00 WINVER=0x0A00)
+target_compile_options(KotOR-CE PRIVATE "/FI${CMAKE_CURRENT_SOURCE_DIR}/compat.h")
+set_property(TARGET KotOR-CE PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
+set_property(TARGET KotOR-CE PROPERTY MSVC_DEBUG_INFORMATION_FORMAT "")
+target_link_options(KotOR-CE PRIVATE /DEBUG:NONE /INCREMENTAL:NO)
+target_link_libraries(KotOR-CE PRIVATE advapi32 shell32 user32 bcrypt msdelta ole32)
+
+add_executable(discovery-tests EXCLUDE_FROM_ALL discovery-tests.cpp)
+target_compile_features(discovery-tests PRIVATE cxx_std_17)
+target_compile_definitions(discovery-tests PRIVATE _CRT_SECURE_NO_WARNINGS strcasecmp=_stricmp
+  _WIN32_WINNT=0x0A00 WINVER=0x0A00)
+target_compile_options(discovery-tests PRIVATE "/FI${CMAKE_CURRENT_SOURCE_DIR}/compat.h")
+set_property(TARGET discovery-tests PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
+target_link_libraries(discovery-tests PRIVATE advapi32)

@@ -1,0 +1,18 @@
+LZMA decoder from the 7-Zip 24.09 SDK
+The following included/compiled source files declare public-domain status:
+
+/* LzmaDec.c -- LZMA Decoder
+2023-04-07 : Igor Pavlov : Public domain */
+
+/* LzmaDec.h -- LZMA Decoder
+2023-04-02 : Igor Pavlov : Public domain */
+
+/* 7zTypes.h -- Basic types
+2024-01-24 : Igor Pavlov : Public domain */
+
+/* Compiler.h : Compiler specific defines and pragmas
+2024-01-22 : Igor Pavlov : Public domain */
+
+/* Precomp.h -- precompilation file
+2024-01-25 : Igor Pavlov : Public domain */
+

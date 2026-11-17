@@ -1,0 +1,14 @@
+KotOR:CE licensing overview
+
+The source contains separately licensed components. This overview does not
+relicense third-party work or grant rights to proprietary games or assets.
+
+The combined engine incorporates GPL-2.0-only OpenJK code. Distribution of that
+combined engine must comply with GNU GPL version 2; see COPYING and LICENSING.md.
+
+The K12 foundation retains its authors' CC0 1.0 dedication. Its complete original
+license text is preserved in LICENSES/K12-CC0-1.0.txt. Existing per-file notices
+and the component notices in LICENSES remain applicable. Do not interpret CC0 as
+a license for the entire combined engine, proprietary game assets or trademarks.
+
+Read LICENSING.md for selected dependency alternatives and data/rights limits.

@@ -1,0 +1,87 @@
+// Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
+#pragma once
+class CSWGuiMainInterface;
+class CSWSObject;
+class CSWSCreature;
+class CSWCArea;
+class CSWCCreature;
+class CResRef;
+class CSWGuiScene;
+class CSWPlayerControl;
+class CSWCameraOnAStick;
+class Gob;
+class Part;
+struct Vector;
+class CAurScene;
+class CAurCamera;
+class CSWBehaviorCameraCombat;
+class CGameEffect;
+void K1EngageTagMeleeDamage(unsigned long long attacker,unsigned long long target,CGameEffect* effect);
+void K1EngageFatalMeleeDamage(CSWSCreature* target,CGameEffect* effect);
+const char* K1EngageDismemberModel(CSWCCreature* actor,const CResRef& original,int slot);
+
+bool K1EngageEnabled();
+void K1EngagePreloadNavigation(CSWCArea* area);
+void K1EngageUnloadNavigation(unsigned long long areaId);
+bool K1EngageArenaLoadoutActive();
+bool K1EngageEnemyAIActive(unsigned long long target);
+bool K1EngageEnemyCanReposition(unsigned long long enemy);
+void K1EngageEnemyRepositioned(unsigned long long enemy);
+bool K1EngageEnemyFacesSwing(CSWSCreature* enemy);
+bool K1EngageUseBodyRig(CSWCCreature* actor,const CResRef& original);
+const char* K1EngageBodyRigResource(CSWCCreature* actor,const CResRef& original);
+bool K1EngageOwnsEnemy(unsigned long long serverId);
+bool K1EngageEnemyMovementOwned(unsigned long long serverId);
+bool K1EngageEnemyForceWalk(unsigned long long serverId);
+bool K1EngageEnemyAttack(CSWSCreature* enemy,unsigned long long target);
+float K1EngageEnemyMeleeRange(CSWSCreature* enemy);
+bool K1EngageEnemyHasClearShot(CSWSCreature* enemy,CSWSObject* target);
+bool K1EngageActive();
+bool K1EngageEngaged();
+bool K1EngagePlanning();
+bool K1EngagePauseInput(bool engageFromPlanning = false);
+float K1EngagePlanningTurn();
+float K1EngageCameraDelta(float delta);
+constexpr float K1EngagePlanningSpeed = .005f;
+bool K1EngageForceWalk();
+bool K1EngageMouse(bool left, bool down);
+void K1EngageUpdate(float delta);
+void K1EngageDetected(bool automatic=false);
+void K1EngageSuspend();
+bool K1EngageEnter();
+bool K1EngageTryDisengage();
+bool K1EngageCancelQueuedActions();
+bool K1EngageMayClearCombat();
+void K1EngageHud(CSWGuiMainInterface* hud);
+void K1EngageHudDestroyed(CSWGuiMainInterface* hud);
+bool K1EngageOwnsPlayer(unsigned long long serverId);
+bool K1EngageHoldNativeAction(unsigned long long serverId, int action);
+bool K1EngageCanMovePastCombatMarker(CSWSCreature* actor);
+bool K1EngageIncomingMelee(CSWSCreature* attacker, CSWSObject* target);
+bool K1EngageIncomingContact(CSWSCreature* attacker, CSWSObject* target);
+bool K1EngageBlocksMelee(unsigned long long attacker, unsigned long long target);
+bool K1EngageGuardContact(unsigned long long attacker,unsigned long long target);
+void K1EngagePoiseDamaged(CSWSObject* target);
+// Negative for every model except the HUD's independently owned saber preview.
+int K1EngagePoiseBladePercent(Gob* model);
+// Screen-space emitter/tip for the double-blade HUD preview only.
+bool K1EngagePoiseBladeRange(Part* part,float& baseX,float& tipX);
+// Presentation adjustment for the HUD staff hilt only; excludes blade draws.
+bool K1EngagePoiseHiltScale(Part* part,Vector& scale);
+// Blade-local translation following the HUD hilt's adjusted emitter anchor.
+bool K1EngagePoiseBladeOffset(Part* part,Vector& offset);
+void K1EngageModelProbe(CSWGuiScene& scene);
+void K1EngageKey(int scancode, bool down);
+bool K1EngageLook(int dx, int dy);
+bool K1EngageControl(CSWPlayerControl* control, float delta);
+bool K1EngageCamera(CSWCameraOnAStick* camera);
+bool K1EngageSuppressEdgeCamera(int edgeX,int edgeY,bool validPointer);
+bool K1EngageCamera(CSWBehaviorCameraCombat* camera);
+void K1EngageRestoreCameraTarget(CAurCamera* camera);
+void K1EngagePresentCamera(CAurCamera* camera, float delta);
+bool K1EngageOwnsAnimation(Gob* model);
+void K1EngagePreparePose(Gob* model);
+void K1EngageRestoreUtilityPose(Gob* model);
+void K1EngagePose(Gob* model, float delta);
+void K1EngageAfterSceneRender(CAurScene* scene);
+void K1EngageRenderSaberMarks(CAurScene* scene);

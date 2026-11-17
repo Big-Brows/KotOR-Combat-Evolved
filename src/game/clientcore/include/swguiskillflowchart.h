@@ -1,0 +1,177 @@
+#pragma once
+
+#ifndef CSWGUISKILLFLOW_H
+#define CSWGUISKILLFLOW_H
+
+#include "swguicontrol.h"
+#include "swguidrawable.h"
+
+struct CSWGuiExtent;
+
+// One row group of the character-screen skill/feat/power flow chart.
+class CSWGuiSkillFlow : public CSWGuiControl {
+public:
+    CSWGuiSkillFlow();
+
+    virtual void SetExtent(const CSWGuiExtent& extent);
+    virtual void Draw(float f);
+    virtual CSWGuiSkillFlow* AsSkillFlow();
+
+    // Resets all three slots to the empty state (id -1, status 0, deselected).
+    void Clear();
+
+    // Screen-space hit test over the three slots' background extents; returns the first hit's id,
+    // and falls back to slot 0's id when nothing hits. The scan stops at the first empty slot.
+    int SkillHitCheckMouse(int nX, int nY);
+
+    // Slot::m_bStatus, how SetSkillStatus paints a slot: what the level-up and character screens
+    // know about that feat or power.
+    enum {
+        SKILL_STATUS_AVAILABLE = 0,
+        SKILL_STATUS_OWNED = 1,
+        SKILL_STATUS_GRANTED = 2,           // the new or granted list
+        SKILL_STATUS_UNAVAILABLE = 3,
+        SKILL_STATUS_CHOSEN = 4,
+        SKILL_STATUS_BONUS = 5,             // COLOR_NEW_BONUS; nothing sets it
+        SKILL_STATUS_VIEW = 6,              // the in-game abilities screen: no level-up state
+    };
+
+    void SetSkillStatus(unsigned char bSlot, unsigned char bStatus);
+    void SetSkillSelected(unsigned char bSlot, int nSelected);
+    // Gives a slot its feat or power id and icon.
+    void SetSkillInfo(unsigned char bSlot, unsigned int nId, const CResRef& resIcon);
+    // The slot holding nId, or -1.
+    int GetSkillIDIndex(unsigned int nId);
+
+    // One skill row, with the icon and background images and the id and status the chart sets.
+    struct Slot {
+#if KOTOR1  // K1: each slot also carries its own border
+        CSWGuiBorder  m_border;
+#endif
+        CSWGuiImage   m_imageIcon;
+        CSWGuiImage   m_imageBg;
+        int           m_nId;
+        unsigned char m_bStatus;
+        unsigned char m_bSelected;
+    };
+    Slot m_aSlots[3];
+
+    // Arrow k-1 pairs with slot k.
+    CSWGuiImage m_aArrow[2];
+};
+
+inline void CSWGuiSkillFlow::SetSkillInfo(unsigned char bSlot, unsigned int nId, const CResRef& resIcon)
+{
+    m_aSlots[bSlot].m_nId = nId;
+    m_aSlots[bSlot].m_imageIcon.m_params.SetImage(resIcon);
+}
+
+inline int CSWGuiSkillFlow::GetSkillIDIndex(unsigned int nId)
+{
+    for (int i = 0; i < 3; i++)
+        if (m_aSlots[i].m_nId == static_cast<int>(nId))
+            return i;
+    return -1;
+}
+
+#endif // CSWGUISKILLFLOW_H
+
+#ifndef CSWGUISKILLFLOWCHART_H
+#define CSWGUISKILLFLOWCHART_H
+
+#include <stddef.h>
+#include "CExoArrayListDtors.h"
+#include "appmanager.h"
+#include "clientexoapp.h"
+#include "guiingame.h"
+#include "nwsrules.h"
+#include "nwspell.h"
+
+class CSWSCreatureStats;  // servercore stats
+class CSWCCreatureStats;  // clientcore stats
+
+// The skill/feat/power flow-chart grid on the character screen.
+class CSWGuiSkillFlowChart {
+public:
+    CSWGuiSkillFlowChart();
+    ~CSWGuiSkillFlowChart();
+
+    void ClearChart();
+
+    void BuildSortedPowerList(CExoArrayList<unsigned>& list);
+    void BuildSortedFeatList(CExoArrayList<unsigned short>& list);
+
+    void AddFeatSet(unsigned int nFeatA, unsigned int nFeatB, unsigned int nFeatC);
+    // nSecret != 0 pins all three slots' icons to the "ip_secret" resref instead of the spell's own.
+#if KOTOR1  // K1 has no secret-icon argument
+    void AddPowerSet(unsigned int nPowerA, unsigned int nPowerB, unsigned int nPowerC);
+#else
+    void AddPowerSet(unsigned int nPowerA, unsigned int nPowerB, unsigned int nPowerC, int nSecret);
+#endif
+    void CreateFeatChart(CSWSCreatureStats* pStats);
+    void CreateFeatChart(CSWCCreatureStats* pStats, int nBonus);
+    void CreatePowerChart(CSWSCreatureStats* pStats, int bShowAvailable);
+    int  HandleInput(int nKey);
+
+    unsigned char GetSkillStatus(unsigned int nId);
+    void SetSkillStatus(unsigned int nId, unsigned char bStatus);
+    void SetSkillStatusAll(unsigned char bStatus);
+    void SetSelectedSkill(unsigned int nId);
+    int  SetTopLeft();
+    // The id in the selected slot of the selected flow; -1 when the chart is empty.
+    int GetSelected()
+    {
+        if (m_aFlows.m_count < 1)
+            return -1;
+        return m_aFlows.m_pArray[m_nSelectedFlow]->m_aSlots[m_nSelectedSlot].m_nId;
+    }
+
+    CExoArrayList<CSWGuiSkillFlow*> m_aFlows;
+    unsigned char m_nSelectedSlot;
+    unsigned char m_nSelectedFlow;
+};
+
+#endif // CSWGUISKILLFLOWCHART_H
+
+#include "swgui.h"
+#include "swguiingameabilities.h"
+
+class CSWGuiManager;
+class CSWGuiObject;
+class CSWGuiControl;
+
+// The in-game skill check / forced-skill popup, with a list box of skill rows, a message label and
+// an OK button, plus one bound callback invoked when the box is dismissed.
+class CSWGuiSkillInfoBox : public CSWGuiPanel {
+public:
+    // <VTABLE-GEN: binary ground truth (_ZTV) — regenerated by tools/hoist_headers.py; do not edit inside markers */
+    virtual ~CSWGuiSkillInfoBox();
+    virtual void HandleInputEvent(int type, int val);
+#if !KOTOR1  // K1's box has no dismiss callback
+    virtual void OnPanelRemoved();
+#endif
+    // </VTABLE-GEN>
+
+    CSWGuiSkillInfoBox(CSWGuiManager* pGuiManager);
+    void SetSkillList(const CExoArrayList<unsigned int>& skills, unsigned char nType);
+#if !KOTOR1
+    void SetCallback(CSWGuiObject* pObj, void (CSWGuiObject::*pFn)(CSWGuiControl*));
+#endif
+
+    CSWGuiListBox  m_listBox;
+    CSWGuiLabel    m_lblMessage;
+    CSWGuiButton   m_btnOk;
+#if !KOTOR1  // K1 builds its entries right after the OK button
+    void (CSWGuiObject::*m_pCallback)(CSWGuiControl*);
+    CSWGuiObject*  m_pCallbackObj;
+#endif
+#if KOTOR1  // K1: ten rows
+    CSWGuiInGameSkillEntry m_aEntries[10];
+#else
+    CSWGuiInGameSkillEntry m_aEntries[20];
+#endif
+};
+
+#if !KOTOR1  // K1's GUI base classes are smaller
+K2_LAYOUT_ASSERT(sizeof(CSWGuiSkillInfoBox) == 0x5888, "CSWGuiSkillInfoBox size drift");
+#endif
