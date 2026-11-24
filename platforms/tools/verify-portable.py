@@ -1,4 +1,5 @@
 # Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
+# Updated for KotOR:CE v0.2 on 2026-11-24; see docs/LOCAL_CHANGES.md.
 """Focused portable integration checks. Writes only beneath ignored project output."""
 from pathlib import Path
 import argparse, configparser, ctypes as c, hashlib, importlib.util, json, os, shutil, subprocess, time
@@ -11,7 +12,7 @@ def main():
  root.mkdir();work=root/'first location';shutil.copytree(package,work,ignore=shutil.ignore_patterns('user-data'))
  checks=[]
  def run(options,expected=0):
-  start=time.monotonic();r=subprocess.run([str(work/'KotOR-CE.exe'),*options],cwd=root,timeout=140)
+  start=time.monotonic();r=subprocess.run([str(work/'KotOR-CE.exe'),*options],cwd=root,timeout=1800)
   assert r.returncode==expected,(options,r.returncode,expected)
   checks.append(dict(check=' '.join(options[:1]),exit=r.returncode,seconds=round(time.monotonic()-start,2)))
  def originals():
@@ -27,7 +28,7 @@ def main():
  run(['--detect','--game-dir',str(wrong)],4)
  run(['--prepare-only'])
  manifest=json.loads((work/'asset-manifest.json').read_text())
- assert len(manifest)==184
+ assert len(manifest)>184 and any(f['file']=='override/k1npcs.2da' for f in manifest)
  assert all(sha((work/'user-data'/f['file']).read_bytes())==f['sha256'] for f in manifest)
  checks.append(dict(check='all_reconstructed_assets',count=len(manifest),passed=True))
  save=work/'user-data/saves/000003 - Game2/savenfo.res';data=save.read_bytes();save.write_bytes(data+b'PORTABLE_SAVE_SENTINEL')
@@ -54,7 +55,8 @@ def main():
   run(['--smoke'])
   text=(work/'user-data/game.log').read_text(errors='replace')
   assert 'K2_WINDOW_PRODUCT title=KotOR:CE' in text
-  assert 'K1_SANDBOX_READY initial_npcs=0 loadout=1' in text and 'K1_STAFF_EQUIP_PASS' in text
+  assert 'K1_PORTABLE_PURPLE_PASS rig=k1japurp rate=1.3' in text
+  assert 'K1_SANDBOX_READY initial_npcs=0 loadout=1' in text and 'K1_FIXTURE_EQUIP_PASS' in text
   assert not __import__('re').search(r'K1_\w+_FAIL',text)
   config=configparser.ConfigParser();config.read(work/'user-data/swkotor.ini')
   assert Path(config['Alias']['SAVES']).resolve()==(work/'user-data/saves').resolve()

@@ -1,5 +1,37 @@
 # KotOR:CE local K1 Engage prototype
 
+## Red motion, guard and JKA directional chains
+
+Red uses separate player/NPC resources. Its first attack retains the S3/A3/R3
+sequence. Subsequent cuts select the owned T3 transition from the outgoing end
+quadrant to the incoming start quadrant, followed by A3/R3; matching quadrants
+start A3 directly. The preserved OpenJK SP bg_panimate.cpp transition table supplies
+all49 selectors, including the bottom-quadrant fallback. Existing local swing rates,
+three-swing limit, NPC chain chance and poise policy remain intentional differences
+from full JKA gameplay rules. No JKA special moves or balance replacement is implied.
+
+The exporter retargets source components once and builds the full-body/upper-body
+variants through the existing model writer, with fixed initial-correction blends.
+The engine timing contract in include/k1redchain.inc is verified against both exports.
+Player and per-NPC outgoing-direction state selects clips, contact windows and
+full-pose references for moving layers. Transition time is excluded from damage;
+existing strike follow-through and contact cancellation services remain active.
+Fixed sides0/2 weapon tags avoid the older deformed-tag rotation flips. Completed
+yellow/staff/dual resources and specific tuning remain unchanged.
+
+Red idle guard uses the original first-export j_guard/y_guard controllers. Later
+marker-spacing, wrist, finger, elbow and helper-frame alignment corrections were
+reverted at user request. The generator isolates the original retarget convention
+for guard while retaining the corrected attack/transition sampler. Player guard
+controllers are checked against the preserved first export; player/NPC loaded
+control samples verify both full and upper guard clips. Native-grip alignment
+assertions were removed because they conflict with the requested original pose.
+Yellow/red switching snapshots displayed local joint values by name through native
+appearance replacement, then seeds the existing240ms per-body pose/grip blend.
+Held guard stays held; outgoing swings/contacts are canceled. Reversals start from
+the displayed pose. Red/cross-stance blend clocks advance at most25ms per displayed
+frame to tolerate rebuild stalls. Native running and ordinary completed playback
+retain their established services and timing.
 ## Portable Windows startup
 
 The product name is KotOR:CE, with KotOR-CE used in Windows filenames. The
@@ -28,13 +60,99 @@ exclude owner identifiers, populated Windows user paths and CodeView/PDB records
 runtime logs/settings stay outside the fresh archive. Usage, exact checks and
 version/redistribution limitations are in `docs/PORTABLE.md`.
 
+## Custom combat utilities and player blunt weapons
+
+Owned custom-combat actors retain native Force execution, cost, targeting and
+impact scripts. Plain damage skips concentration cancellation and damage flinch
+while a Force cast owns the native spell round. Death and status effects retain
+their native services. Recovery is capped at100ms; completed spell/item executors
+end the spent round through `EndCombatRound(0)` before processing pending actions.
+Both native item-animation completion paths use this release. Active casts and
+queued action lists are not bulk-cleared. Target/personal GUI handlers preserve
+queues while Engage is active/planning. Mine menu entries translate server item
+IDs to client IDs before the native input message performs placement.
+
+Player admission includes native baton, quarterstaff, Gaffi and battleaxe categories.
+The existing NPC solid-weapon sampler supplies their actual drawn mesh extent;
+no powered-saber stand-in is required. Native wield types select single/staff
+services without editing authored stance assets. A baton may successfully parry;
+if its parry fails, held guard returns false and native contact applies damage.
+These changes do not implement unarmed or creature-natural player combat.
+
+## Local saber contact feedback and sandbox movement recovery
+
+Custom clash, guard and parry resolutions reuse native `CSWCVisualEffect` row4011
+(`v_parrspr_imp`), the payload used by KotOR's own saber HitContactEvent. Its two
+spark emitters and authored animated light use normal client VFX lifetime services.
+The position comes from closest points on the actual drawn weapon segments, with
+powered-saber gating. No shared model or animation is modified.
+Successful player parries flash the full dial yellow for300ms on a steady clock;
+existing directional/guard selection remains underneath and GL state is restored.
+
+Surface burns sample powered sabers in both hands and both staff tips, with an
+independent trail per blade. First contact stamps the actual native hit point so
+a one-frame touch can leave a mark. Continuous scars retain native receiver/normal
+checks and cannot bridge misses, different weapons/receivers or teleports.
+
+Sandbox player movement repairs a cached sub-normal movement factor only when no
+native speed-increase/decrease effect remains to provide it. This is deliberate
+sandbox recovery policy, not an original-engine matching claim. Live slow effects
+remain effective and expire through native services. Rate changes log providers
+for diagnosing unreproduced slowdowns. Focus loss releases custom held input;
+menu key-up events are accepted to prevent a latched Shift walk.
+
 ## Sandbox menu and NPC ownership
+
+Wearable-body adaptation extends the player appearance path through
+`k1armorrigs.2da`. It selects six separate style resources by the native appearance
+body model, including all male/female small/medium/large armor, robe, clothing and
+underwear families, unique humanoid companion clothes and native armor disguises.
+PMBBL keeps its six original authored resources. The existing native NPC rig table
+and NPC stance admission remain separate and retain their completed behavior.
+
+`prepare-k1-wearable-rigs.py` audits owned appearance/base-item/item data and invokes
+the existing native-body transfer with player donors. Original meshes, UVs,
+materials, non-spine skin weights and bind frames remain native; palette splitting
+preserves all faces, with exported inverse-bind and animation-key roundtrip checks.
+The new resources and provenance stay ignored. `prepare-k1-wearable-checks.py`
+finalizes a verified manifest and native equipment witnesses. Launcher deployment
+checks hashes and authored donor identity under the existing isolated-profile lock.
+
+Runtime appearance selection uses native B-type model/texture lookup, or the native
+race model for disguise bodies. Native equipment and appearance updates rebuild
+the appropriate source body and retain head/weapon attachment ownership. External
+body replacement invalidates outgoing pose/contact identities in the native
+creature body-unload callback before deletion (the later load callback is too
+late, including when the allocator reuses a body address);
+ordinary stance rebuilds keep their existing blend path. Idle, guard and running
+samplers use that body's native reference. Saved authored guard coordinates are
+converted through bind frames and height for new bodies; PMBBL tuning is unchanged.
+Native utility/status handoffs and original-model restoration use the same engine
+services. Existing dismemberment mappings resolve adapted models to their native
+body names; adding further cut-mesh families is a separate task.
+
+The native unnamed-humanoid catalog, separate body/style resources, indexed-bone
+preservation and native ownership boundary are documented in
+[MELEE_NPC_COVERAGE.md](MELEE_NPC_COVERAGE.md). This extends the sandbox only;
+the historical Dark Jedi-only catalog description below records its foundation.
+
+The current three-column faction/type/variant browser is documented in
+[SANDBOX_SPAWN_MENU.md](SANDBOX_SPAWN_MENU.md). Its generated metadata references
+unchanged UTC templates through independent stat and cosmetic aliases. A runtime
+appearance callback applies body/head/armor cosmetics while retaining source
+stats and equipment. Sandbox-only maps select compatible Red/Blue body rigs;
+registered sandbox actors clear Plot/Min1HP protection. Native list boxes own their rows, the modal owns its preview
+scene, and existing spawn services own arena actors. The global target-player
+policy is sandbox-scoped and enforced by reputation queries plus native attack
+and spell admission. The existing threat scan recognizes an opposing NPC pair
+when player targeting is disabled, preserving combat activation without making
+the player a target. The description below is the earlier fixture-menu design.
 
 Top-row0 opens a native modal CSWGuiPanel in the isolated arena. The panel reuses
 KotOR controls, fonts and borders; opening locks movement and holds the native
 pause. Closing restores the prior pause/planning/active state after pending pause
 requests finish. Other menus/dialogs retain their input ownership. The NPC catalog
-currently exposes Dark Jedi with separate Yellow/Double-blade stance selection.
+currently exposes Dark Jedi with separate Yellow/Double-blade/Dual-saber stance selection.
 Sandbox startup leaves the established arena empty and suppresses its automatic
 replacement loop; ordinary arena launches retain that loop until the menu is used.
 
@@ -61,7 +179,7 @@ currently apply to arena actors, not campaign-wide NPC editing or party membersh
 
 ## Separate Dark Jedi fighting types
 
-The local K1NpcType catalog assigns stable IDs `dark-jedi` and `dark-jedi-staff`,
+The local K1NpcType catalog assigns stable IDs `dark-jedi`, `dark-jedi-staff` and `dark-jedi-dual`,
 with distinct UTC/tag/Engage-body resources. The staff entry uses k1darkstaff,
 k1arena_darkstaff and k1jadstaff; native appearance remains n_darkjedim. Identity
 comes from each actor's template tag, independently of the player's stance or a
@@ -137,16 +255,67 @@ gate remains. Missing original art keeps the previous gui_mp software fallback.
 The opt-in CursorProbe compares all92 actual cursor draws against decoded source
 pixels at three sizes and checks transparent background/hotspot/visibility behavior.
 
-## Dismemberment (explicit local opt-in)
+## Dismemberment (sandbox or explicit local opt-in)
+
+Local policy revision (2026-11-23): a qualifying fatal powered-lightsaber region
+hit is guaranteed to detach its selected part; the historical resource-table
+probabilities are no longer rolled. Existing native fatality, saber-only,
+region/direction, resource and Tusken no-leg gates remain. The original22 native
+damage integers are preserved; private marker/row/serial plus normalized horizontal
+blade motion are copied as additional integers through the existing native effect
+queue. Old diagnostic25-integer payloads remain supported. Detached parts travel
+1.25–1.75 metres along the contact sweep, without the old random outward yaw;
+vertical/degenerate sweeps use attack direction/facing as a stable fallback.
+Native projectile acceleration, final-pose freezing, floor alignment and cleanup
+remain in use. Detached Gob objects and their cosmetic head/weapon attachments
+have shadows disabled via TurnOffShadows; retained corpse shadow settings remain
+unchanged. This avoids full-skeleton shadow proxies without editing shared models
+or changing the engine's global shadow behavior.
+
+Native NPC finger ownership follows the complete bicep/forearm/hand bone ancestry,
+including KotOR's RaFngr/LaFngr names. Wrist candidate selection rejects planes
+leaving wholly finger-weighted triangles on the retained body; the detached model
+must preserve those triangles. This matters for the Aqualish curled left fingers.
+Both sides retain native skin weights and animation tracks. Body appearance updates
+can replace the retained wound materials with clothing textures, so corpse update
+and render preparation restore dismember_cap/dismember_glow to jkcap/jkcapgl.
+Fatal-case probes verify retained as well as detached cap materials. The explicit
+Tusken no-leg policy remains in both generation and runtime table/contact selection.
+
+The original24 cut pairs are retained. The unnamed NPC catalog adds310 cut pairs
+for39 native body/armor models. Tusken right/left legs are deliberately excluded;
+their arms, hands, waist and head remain eligible. Both table loading and contact
+selection enforce this policy, including stale rows. All source stats, feats and
+abilities remain native. Ordinary fatal powered-lightsaber contact and the existing
+probability/direction policy are retained.
 
 Local cut-pair preparation preserves native skeletons/supermodels for KotOR death
 playback. Intersections interpolate original UV/normal/skin attributes; cap rims
 reuse intersection weights. Player head is a separate attachment model. Place its
 neck plane beyond the full native attachment rim, rejecting non-neck influences
 and excessive clearance. The soldier waist uses the native torso joint above its
-belt opening. All 24 cut pairs and original JKA caps/glow textures live only in
-ignored generated/profile output. Offline interpolation can change the native
+belt opening. All cut pairs and original JKA caps/glow textures live only in ignored
+generated/profile output. Offline interpolation can change the native
 posed surface by 17.81mm; connected cap checks do not establish visual acceptance.
+
+The NPC generator reuses the cut interpolation/cap services and validated native
+palette partitioner. Source surface area, serialized inverse binds, original joints,
+supermodels and native animation node/channel/key values are checked. It preserves
+native tangent data. Open garment contours receive bounded local cap closures,
+recorded in ignored diagnostics. This is custom geometry; visual acceptance is not
+established by geometric checks. The reader's editor-only animated flag must be set
+when exporting original animation trees; packed overflow quaternions follow K12's
+native normalization. No completed stance assets or tuning are edited.
+
+A separate k1npccuts.2da references native bodies and their bone-local cut resources.
+Runtime maps each of the five NPC style rigs back to its native body. Differently
+named or whole-body meshes use their native skin palette to identify the contacted
+anatomical surface, followed by local bone regions. Separate cosmetic heads remain
+whole attachments to the detached neck/waist; both wielded weapons follow their
+respective detached hand/arm or upper body. The existing native fatal-effect,
+appearance rebuild, death playback, frozen pose, flight, revival and area cleanup
+services own this work. The sandbox launcher validates and copies the assets under
+its existing profile lock; generation and deployment must run sequentially.
 
 The local adapter retains the doubled-threshold probability gate from pinned
 OpenJK. User tuning sets all supported actor/part thresholds to45 (nominal90%,
@@ -277,6 +446,16 @@ The ordinary native body is unchanged. Broader timeline grip/angular failures
 remain identical before/after; this fixes backpack shape rather than claiming
 whole-character deformation-free playback.
 
+The PMBBL torso also has a 16-vertex open back rim normally hidden by that rigid
+accessory. Stance motion can expose it. The existing staff closure triangulates
+that rim with 14 faces using its original vertices, UVs and skin weights. Apply
+the same closure to Yellow/Red/Blue/Purple; duals and staff already contain it.
+Equal skin weights on welded rim copies keep the cap attached under every pose.
+The offline fill-k1-back-panels.py postprocess preserves all original faces and
+animation tracks, verifies binary roundtrip and can install verified components
+with updated identity hashes. Staff regeneration accepts an already-closed seed.
+Native Dark Jedi robes lack this opening and need no backpack-specific patch.
+
 ## JKA saber surface marks
 
 The isolated launcher reads owned JKA base/assets1.pk3, extracts rivetmark.tga
@@ -341,6 +520,27 @@ cache miss are required by the fixture; original byte hashes remain in ignored
 provenance. Earlier three-clip experiments and the collision trace are retained.
 
 ## Melee poise prototype
+
+Local clash policy (2026-11-23): every accepted saber deflection spends10 poise
+on each actor, regardless of stance, through the existing native break/stun path.
+Duplicate contacts retain the resolver's existing suppression. Each actor keeps
+the same opponent and consecutive clash count in its existing poise state.
+The immediate subsequent successful parry consumes the mutual episode and adds
+5*(count-1) to the existing attacker-stance parry penalty. The defender's existing
+parry reward is unchanged. A single clash grants no bonus; five grant20.
+Damage, ordinary blocks, native utilities/status, opponent/equipment changes,
+planning and an intervening missed swing clear both sides. A continued attack
+chain after a miss also clears the episode at the next swing boundary.
+
+After a clash, an NPC makes one next-action decision at5*count percent, capped100.
+A successful decision selects its existing timed guard instead of an attack;
+an eligible contact then parries without a second ordinary percentage roll.
+Failed decisions keep the swing path and are not rerolled on every update.
+Ordinary NPC parries outside episodes retain their native local/fixture setting.
+The guard waits at most two world seconds so two NPCs choosing guard cannot wait
+forever; an incoming miss or any other episode interruption also cancels it.
+Stance animation assets and underlying KotOR weapon/character data are unchanged.
+This supersedes the historical Red-only clash contribution described below.
 
 ### Weapon audio
 
@@ -440,7 +640,7 @@ Zero uses the same native stun/25% recovery service. Wrong/neutral guards retain
 ordinary defender20 loss; unguarded hits retain native HP damage. An NPC's
 existing timed parry (not its ordinary close guard) now applies the same result
 to a real incoming player swing. This reuses the existing NPC reaction window;
-it adds no directional NPC aiming AI. Attack-vs-attack0.5s clashes retain their
+it adds no directional NPC aiming AI. Attack-vs-attack timed deflections retain their
 separate harmless chain-reset rule. No new animation assets.
 
 NPC timed-parry contact additionally requires a percentage roll. The supported
@@ -491,31 +691,44 @@ during recovery and restart afterward. Both check the1us-before/exact deadline
 boundary on the state generated by the actual parry. Range checks include a
 point0.5m beyond the old marker limit and one beyond the new limit.
 
-Player and NPC posed blade sweeps collect contacts before resolving damage in
-K1EngageAfterSceneRender. Contacts are accepted only for current live swing
-serials. If both fighters are swinging, hold a possible reciprocal body hit for
-500000 world microseconds, inclusive. A reverse hit within that window clashes
-instead of dealing ordinary HP/guard
-damage. Each fighter retains its poise and ends its chain and buffered
-follow-up; blade history/contact consumption and existing pose blending reset.
-Held player attack needs a fresh press; the NPC retains its150ms restart cooldown.
-Clashes apply no poise-spend or native stun effect; ordinary swing-end activity
-still controls passive regeneration. Duplicate contacts are
-deduplicated. Nonreciprocal contacts retain normal hit/guard handling; ranged
-bolts and native powers are not batched as clashes. Hits against a nonswinging
-target resolve immediately. After an unpaired candidate expires, resolve its
-accepted open hit once, even if its source advanced to another chain link; a
-later idle guard cannot retroactively block it. Dead/missing/other-area actors
-and lost source ownership invalidate pending contacts. World time preserves
-slow planning and hard pause; disengage/HUD destruction clear pending state.
+Player and NPC posed blade sweeps collect body contacts before resolving damage
+in K1EngageAfterSceneRender. Contacts are accepted only for current live swing
+serials. The local basic timed-deflection experiment replaces the earlier spatial
+blade-region experiment. No melee contact persists between scene updates; the
+former reciprocal body-hit timeout remains removed. Single, dual and staff body
+sweeps use their preserved original geometry and subdivision services again.
 
-The focused ClashProbe starts actual player and NPC top swings250ms apart in both
-orders, traces the existing posed meshes and requires a cross-update clash,
-unchanged HP and100 poise each, cleared chains and victory cleanup. It uses the normal
-cached navigator acquisition before holding still. It does not inject contacts.
-The separate installed-actor dispatch test checks both orders at0/60000/100000/
-300000/499999/500000us, duplication,500001us expiry and normal one-sided guard cost. The ordinary
-enemy suite remains separate and retains all damage/navigation/lifecycle checks.
+Each actual player swing start records attackNow in playerAttackStartedAt;
+each NPC swing start records now in NpcPlayback::attackStartedAt. Both include
+automatic chain links. The clock is world time, respecting hard pause and planning
+speed. K1AttackDeflection::Eligible accepts nonnegative starts whose age is
+0..500000us inclusive; missing/future/older starts are ineligible. Only the
+defender's swing age matters. The defender must still be swinging, and existing
+live ownership, melee-poise, broken-poise and native-status exclusions apply.
+There is no new facing, matching attack direction, input-edge, blade-position
+or one-use eligibility gate. Existing attack controls/AI still decide when an
+attack can start; this does not add new directional aiming AI.
+
+An accepted incoming body contact against an eligible defender immediately stops
+both chains and buffered follow-ups, consumes the existing contacts and reuses
+pose blending, weapon Clash sound and NPC150ms restart cooldown. Held player
+attack retains the existing fresh-press restart behavior after cancellation; the
+eligibility check itself does not require a fresh press. Each Red participant
+deals10 poise points to its opponent once per resolved deflection. Purple's
+inherited Red animation does not grant that bonus. Existing native guard-break
+effects and regeneration remain, and a deflection causes no HP damage.
+Per-update duplicate contacts are deduplicated; there is no additional per-attack
+deflection counter. Stopping both swings naturally ends their active eligibility.
+
+Outside the window, body contacts enter native guard/parry/damage in the same
+scene update. Native EVENT_APPLY_EFFECT scheduling remains asynchronous. This
+adds no hit waiting period and does not promise synchronous death presentation.
+Ranged bolts and native powers retain their existing paths. The runtime marker
+is K1_MELEE_DEFLECTION eligibility_us=500000 delay_us=0. Diagnostic fixtures
+supply actual start timestamps rather than synthetic spatial interception flags.
+Component checks and installed-data limitations are recorded in STATUS.md.
+The earlier experiment/evidence is preserved in the ignored checkpoint under
+platforms/out/timed-deflection and platforms/out/defensive-interception.
 
 Poise is keyed by server actor independently of source body playback, so native
 utility/status body swaps and planning do not reset it. An equipped main-hand
@@ -765,13 +978,22 @@ before the existing150ms enemy attack cooldown; ranged fire cadence is unchanged
 The enemy arena probe requires a completed capped chain before its contact and
 movement/guard/lifecycle checks proceed.
 
-The user's local readability profile uses NPC melee playback rate0.82 and yellow-player
-rate0.8528 (exactly4% faster); attack/contact/chain windows stay in clip time, native utility
+The user's local profile uses player Yellow/Red1.0, Blue1.15, Purple1.30, staff1.10
+and duals0.85; NPC Yellow/staff0.85, Red/Blue1.0 and duals0.75.
+Attack/contact/chain windows stay in clip time, native utility
 playback and ranged fire cadence retain their existing rates. Melee NPC direction
 weights are4 overhead,3 each upper diagonal,3 each side,1 each rising cut.
 The existing native18-sided choice maps to those weights: upper cuts total55.6%
 (previously62.5%), horizontals33.3%, rising cuts11.1%. The full18-choice mapping is tested exactly;
 these are intentional local preferences, not claimed OpenJK defaults.
+
+Spinning links use their complete authored body pose instead of an upper-body
+layer over locomotion. The preserved JKA SP PM_SpinningSaberAnim classification
+selects16 Blue pairs and nine Red pairs. Red/Purple players and Red NPCs now share
+the existing Blue handling: suppress native gait replacement and live spine aim
+correction during the spin, retaining authored pelvis/leg rotation. Physical
+movement continues through the normal controller; normal moving links still use
+upper layers. Classifiers do not alter animation tracks or contact windows.
 
 The authorized target is source-ported grounded JKA humanoid combat behavior and
 animation, with KotOR stats, damage, surrounding systems and utility actions.
@@ -1083,8 +1305,9 @@ unchanged; the player resource selector chooses the separate k1jastaff when this
 opt-in mode is active and the actual player weapon is double-bladed. NPC single
 saber eligibility remains on its existing path.
 
-The player staff selects playback0.95 and a four-swing chain cap through the
-existing controller; yellow remains0.8528/three and NPCs0.82/three. Both click
+The player staff selects playback1.10 and a four-swing chain cap through the
+existing controller. Yellow/Red/duals have three-swing caps; Blue/Purple/staff
+have four. NPC staff playback is0.85. Both click
 and held chaining use the selected player cap. Source clip/hit-window times,
 native utility animation rates and movement speeds are unchanged.
 
@@ -1094,9 +1317,9 @@ and retain blade identity through the existing queue's duplicate suppression.
 The first accepted contact retains the normal native health-damage opportunity;
 later blade contacts are guard-poise-only. They cannot add health damage, create
 extra reciprocal clashes, or survive interruption of the original swing. A guarded
-staff blade spends13 defender poise, so two normal blocks spend26. Parry chance,
+staff blade spends11 defender poise, so two normal blocks spend22. Parry chance,
 defender reward and break effects are unchanged; parrying cancels remaining contacts.
-When the staff player is parried, spend30 poise rather than the default25.
+When the staff player is parried, spend35 poise rather than the default25.
 
 Staff-player passive recovery uses2.5 quiet world seconds and1 point every0.5s.
 Timing policy remains per actor; NPC/yellow use2s and0.1s. Activity, running,
@@ -1350,3 +1573,277 @@ its exact rootdummy-subtree controller coverage plus default top-level nodes;
 this differs from an all-node preview count without changing the pose contract.
 Runtime camera/aim/ownership/transition controls and native KotOR guard selection
 remain separate from the source attack data.
+
+## Dual-lightsaber selection and sandbox
+
+DualPrototype or sandbox chooses k1jadual only when the native right and left
+slots contain distinct single/short lightsabers. The native dual-saber animation
+class remains authoritative. Completed yellow/staff selectors, assets and tuning
+are preserved. The new body comes from the established independent-arm solver,
+using owned S6/A6/R6 attacks, P6 parries, dual ready/walk/run clips and rigid local
+rotation interpolation. Completed source mesh/weights are retained; connected
+skin bounds and native attachments are tested separately from visual acceptance.
+Yellow attack cut calibration is excluded by the dual selection path; ordinary
+locomotion uses the same established full gait and run-refinement services.
+
+The user-selected normal dual guard comes from native pmbbl g4r1, resolved with
+CLIENT_ANIMATION_DUAL_SABER_READY through CacheNativeIdle and the existing native-ready transfer service, selected only
+for dual guard. Its two hands stay independent during smoothing; the source
+hand-gap projection must not displace the native grip. Walking transfers only
+the upper guard while keeping the gait below it. All eight full walk/run clips
+are inherited verbatim from completed k1jarig, including their Motion/spine tracks
+and clocks. No hybrid upper/lower gait is generated. Independent native marker
+and finger grips follow each held saber during locomotion after the shared run
+refinement/smoothing, without replacing the gait's wrist/arm motion.
+Walking holds the three spine model orientations at native standing reference,
+retaining pelvis/leg turn and relative arm swing. Dual attacks also bypass the
+single-hilt arm filter and relative-gap projection. The dual top cut rotates the
+right arm inward around its shoulder with a boundary fade; the earlier diagonal
+correction remains. Other non-locomotion keys and mesh weights are preserved. Export-controller comparisons and settled same-frame guard checks
+separate gait identity from the intentional transition out of a preceding run.
+
+The earlier g2r1 selection was a local identification error: it is the single-saber
+ready animation. K1 native knockdown also has no SETSTATE marker, unlike the K2
+handler; the dual player yields on native knockdown animation/commandability and
+resumes only after native get-up. Its held RMB intent survives the handoff, with
+release/re-press events still honored. Shutdown releases NPC bookkeeping without
+accessing actor services after the server/client owners have been destroyed.
+
+The PC HUD owns a second K1PoiseWeaponView for the actual left-hand resource.
+Both scenes receive the same actor poise value and use the existing native
+blade crop/render-state service. Equal viewports/camera framing put the offhand
+24 scaled pixels below the main row, moving the shared percentage below both.
+The second row hides outside dual mode/Engage. No live weapon geometry is edited.
+GPU measurements cover full/half/zero/refilled poise and state restoration;
+native glow color bounds are approximate pixel evidence, not a visual waiver.
+
+k1dualstance.h traces each powered native weapon's real beam through the existing
+posed-body/head triangle and time-clipping services. It submits at most one
+contact per hand per swing to the existing ordered melee queue. Unlike a staff's
+two beams on one weapon, the two independent weapons each have a native damage
+opportunity. This is the initial local dual policy, not a JKA balance claim.
+The inherited player playback rate/three-link cap and normal poise policy are
+provisional; no completed stance is retuned. Native GetDamageRoll receives the
+contact's offhand flag, retaining item/upgrades and native offhand strength rules.
+
+Contact history uses client weapon IDs for model ownership. Queued events carry
+server item IDs and the hand, allowing native slot validation before delivery.
+Equipment changes, parry lockout and native status invalidate remaining dual hits;
+a busy native utility round releases the hand's consumed bit for a physical retry.
+Guard/parry/clash, dismemberment, object ownership, utility/status handoffs and
+restoration continue through the existing services. The same generic NPC controller
+selects a `dual` path for the registered new type; no alternate combat engine is added.
+
+The dual NPC owns k1darkdual/k1arena_darkdual/k1jaddual. Generation reuses the same
+independent-arm solver against the original Dark Jedi mesh and completed full
+k1jadark gait. Native stats/powers are inherited from the existing fixture; the
+new type uses the shared medium Jedi policy and dual rate/chain cap. NPC pose and
+native-ready caches stay per actor. The paired native weapons retain hand0/1
+history and consumed bits; each gets a health opportunity using its server item ID
+and native offhand flag. Staff's second-blade poise-only policy is unchanged.
+Source/native Force and status handoffs, factions, roster and cleanup use existing
+services. Dual and other supported melee participants use the shared immediate
+timed-deflection path described above.
+
+Sandbox inventory supplies another single saber without replacing its starting
+stance. Native equipment switching determines the player stance, and the existing
+spawn arrows cycle all three registered NPC styles. Manifest-verified player/NPC
+components are copied only after acquiring the existing exclusive profile lock.
+
+k1dualprobe.h is an opt-in installed-data test: 21 live input-driven attacks,
+powered native attachments/skin bounds, moving guard/held-chain cap and both
+hands' actual beam contacts across all seven timing windows. It checks excluded
+windup/recovery, unpowered rejection, deduplication, busy-round retry, cancellation
+of a queued contact after parry and native health delivery/restoration. Controlled
+weapon placements test contact plumbing rather than natural reach of each cut.
+They do not establish campaign compatibility or visual/feel acceptance.
+Natural top distance cases additionally verify one native damage delivery per
+actual hand contact,including both contacts at the measured normal distances.
+k1sandboxdualprobe.h exercises native equipment transitions,dual NPC AI/skin/guard,
+independent hand damage,same-scene native effect snapshots with duplicate input,
+native status/Force recovery and AI-off cleanup. The existing sandbox regression
+continues to cover yellow/staff gameplay and area reload.
+
+The dual player closes the concealed back opening using the reviewed staff
+back-panel service: 14 added faces reuse the 16 existing rim vertices, UVs and
+weights. Original faces and animation tracks remain intact. Completed stance
+assets and the separate dual NPC body are unchanged.
+
+After real native utility work ends, player and NPC handoffs release an empty
+stale spell round through EndCombatRound(0) before source control resumes.
+Active utility, native status and physical rounds retain their ownership.
+Optional ContactTiming logs measure contact-to-health and rendered guard/block
+response without changing native damage scheduling. The later timed-deflection
+experiment retains immediate contact resolution, as described above.
+
+
+Balance revision (2026-11-18): dual player/NPC playback is 0.85, chain cap 3,
+each blocked blade costs 13 opposing poise, being parried costs 20, and a
+successful parry grants 5. Dual recovery waits 3 quiet seconds and gains 1 point
+per 0.5 seconds. Staff player/NPC playback is 0.97, each blocked blade costs 11,
+being parried costs 35, and a successful parry grants 15. Staff recovery and its
+four-swing cap remain unchanged. Single-blade tuning remains unchanged.
+Successful parries during active passive recovery preserve its tick/deadline
+and add the reward immediately, capped at 100; other activity rules still apply.
+
+## Native swords and solid-model poise previews
+
+Native base-item wielding remains authoritative. One-handed swords share the
+single-blade selection path, two equipped single weapons use duals, and native
+double swords use staff. Existing native damage, sounds, equipment ownership and
+swept-contact queues are reused. Solid swords use measured guard-to-tip segments
+instead of lightsaber emitters and do not depend on powered state. Existing Dark
+Jedi rigs can follow sword wield style; unsupported NPC body/style combinations
+retain native control rather than borrowing another creature's body.
+
+prepare-k1-sword-geometry.py derives guard-rim, tip and central-grip bounds for27
+owned native sword resources. Only these geometric markers enter source, not
+mesh/resource data; original MDL/MDX hashes and native-data checks remain ignored.
+The poise view loads the equipped sword resource, including each offhand model.
+PartTriMesh applies a scoped screen crop only for these independent HUD previews.
+Project the full grip box to retain the crossguard and pommel under perspective;
+interpolate the blade cut toward the tips as poise increases. Double-ended swords
+deplete both ends toward the central grip. At zero the grip remains; at100 the
+whole original model draws. Restore scissor box/enabled state after each mesh.
+Existing lightsaber blade/hilt render paths and all stance assets remain intact.
+
+The isolated sandbox adds seven ordinary sword templates to its native inventory,
+including two long swords for paired testing. Actual game inventory acquisition,
+equipping and rendered results are user-tested; component checks use stubbed
+engine/GUI services and separately verify owned native resources offline.
+
+Sword attachment roll is an instance correction after the native attachment's
+fresh GetWorld sample, applied in creation, dependent-position refresh and regular
+control. Gate by actual held-model identity and Engage animation ownership; roll
+only around the local shaft, keeping the grip and swept collision segments fixed.
+The UI preview has its own90-degree roll and source framing length per row; fit
+both flat-blade height and perspective depth while retaining the grip-box crop.
+
+Player rig replacement must also hand off native camera targets. The old follow
+part is destroyed with its body, and the native on-a-stick controller clears itself
+when that target disappears. Capture view/type before replacement, ChangeTarget
+to the new follow part (or recreate the cleared controller), restore the displayed
+eye/rotation and refresh saved camera targets. The combat camera's controller can
+remain; its saved follow target must still be refreshed. Other camera modes are
+left under their existing owners. This fixes our appearance-replacement lifecycle
+without changing native camera target-deletion behavior.
+
+Directional player parries evaluate ParryAimAt for the contacting attacker.
+Current successful-parry rewards (2026-11-18 revision): yellow 20,
+double-blade 25 and dual 15, for both player and NPC. These supersede the
+earlier balance-revision reward values above; other tuning is unchanged.
+SelectedParryAim chooses a single reticle display target only; a different
+nearby display target cannot veto an otherwise eligible directional parry.
+Existing front/range/aim-area/dead-zone/direction coverage rules remain intact
+for all stances. K1_PARRY_BLOCK_REASON records rejected aim eligibility and
+direction, including the independent display target, for manual-session diagnosis.
+
+### Native running across saber stances
+
+Yellow, staff and dual player/melee NPC running samples native run on an unattached
+CSWCAnimBase model owned by that body's PosePlayback. CaptureNativePose is the
+unchanged model-space retarget math extracted from CacheNativeIdle; it maps each
+sample onto the current adapted rig, including the extra spine joints. Sampling
+uses the native clip length and a wrapping clock, decreasing for backward input.
+This follows K12's existing WALK_BACKWARD reverse-playback policy; running uses
+the same deliberate reverse policy. No original executable equivalence is claimed.
+
+The existing j_* movement-base names remain selection/layer bookkeeping. Their
+run locals are replaced before the established torso/yaw/transition services:
+full native locals for free movement, pelvis ancestor chain and legs beneath an
+upper overlay. The ancestor chain includes rootdummy, which owns the native run's
+vertical bounce; excluding it previously flattened running while swinging.
+Shift walking, guard-walking and other walking retain the previous JKA path.
+The current +/-45-degree direction policy, attack/guard layers, speeds and final
+native head animation remain active. Native runs bypass the JKA-specific run-refinement
+pass; ranged NPCs keep their existing path. Sampler ownership
+and clock reset with model rebuild, native-action handoff or HUD/area cleanup;
+no native model is attached to the scene and no generated assets are required.
+
+Run selection uses CSWCAnimBase::GetAnimationName with the native client animation
+IDs: RUN_STUN_BATON/runST for double-blades and RUN_DUAL_SABER/runds for duals,
+matching ServerToClientAnimation's powered-saber families. Player equipment mode
+and each NPC's own stance pass the selection into the same sampler. Yellow
+deliberately retains its accepted standard RUN/run rather than changing to runSS.
+Changing the resolved clip resets the sampler's phase/length through its existing
+transition path. Reverse running and swing root carry use the selected clip.
+
+YellowNativeGaitProbe compares player/Dark Jedi/Sith retarget orientations against
+fresh native models over forward/reverse cycles, verifies exact untouched upper
+locals outside the locomotion root/legs, then drives 120 live movement/overlay cases
+across yellow, staff and dual equipment selections.
+It checks native leg locals after the existing 0.14-second transition settles,
+current direction yaw, native movement speed and native equipment-menu
+switches through staff/dual and back. A paired run/run+swing test verifies equal
+native root bounce and pelvis world positions over repeated cycles. Visual gait
+quality remains user acceptance. The legacy probe flag name is retained.
+
+### Head rollback and dual presentation
+
+Custom head targeting, forward alignment and torso-pitch corrections are removed.
+Head transforms again come from existing animations/native behavior. The original
+Engage animation-ownership services remain intact. Blender review exports resolve
+current stance/native sources without modifying or deploying any animation.
+
+Dual guard, stable torso and native grip adjustments precede SmoothBody for
+both players and NPCs, so cached poses match displayed poses and entry/release
+uses the shared transition blend. No animation assets change.
+
+Guard entry/release now selects a 240ms upper-body transition for all three
+stances, with per-body guard history alongside the existing pose history. A
+reversal captures the last displayed pose. Root/pelvis/legs keep their ordinary
+blend duration; attacks and block reactions also retain ordinary timing.
+Guard gameplay eligibility remains immediate; this changes presentation only.
+PresentationProbe checks all six player/NPC source models, rapid reversals,
+unchanged lower-body locals and settled hand targets, alongside live dual
+guard/NPC transitions and menu teardown/reload.
+
+Native animation samplers have no creature external data and must not enter
+NPC ownership lookup during destruction. PC K1 Gob destruction removes runs
+unconditionally with kAnimRemove; gameplay ownership cannot block teardown.
+This prevents map re-entry while sampler destruction clears NPC playback on
+Quit. PresentationProbe exercises two native menu returns, a save reload,
+menu draw/input readiness, nonblack screenshots and dual hand transitions.
+
+### Target movement in melee sweeps
+
+Melee narrow phase keeps previous/current rendered body roots for creatures in
+its current scene. Each attacker's previous blade is expressed in the target's
+current rigid frame before the existing clip-time and triangle sweeps. This
+includes target translation/turning that could otherwise pass through a blade
+between rendered samples. Player single, staff, dual and NPC melee use the same
+service. Native posed body/head triangles and active windows remain unchanged;
+no wider collision volume is introduced. Animation deformation within a frame
+still uses the current native skin pose.
+
+History is ignored for the first blade sample, different bodies/models/scenes,
+scale changes and target movement above2m; area unload clears it. Unmoved roots
+return the original blade without an extra transform. The snapshot commits after
+both combatant sweeps and immediate resolution, so they use one rendered scene.
+World-space blade motion remains separate for native contact direction and limb
+throwing; target-relative motion is collision-only.
+
+The opt-in MeleeHitProbe checks all three sandbox poise tiers and a parry override
+in the actual label, live Purple/Blue/Red chain rates, native damage and once-per-
+swing handling. Its native-mesh moving-target regression demonstrates an old
+world-only sweep miss and tests the corrected hit, clip exclusion, identity reset,
+teleport, stationary and rotation boundaries. MeleeHitMoving exercises running
+upper-body layers; MeleeHitOpponentAi audits damage, blocks/parries, clashes,
+rejections and dropped contacts with an active opponent, plus Blue NPC playback.
+
+
+### Grenade landing and combat mine events
+
+Custom combat keeps the native grenade flight duration, impact event and item
+consumption. Grenade-type projectile11 uses one ballistic segment instead of its
+four-segment bounce program when K1Engage is enabled. Thrown grenade item impacts
+use the selected location with an invalid object target so a moving victim cannot
+move the explosion after release. Other projectile programs retain their paths.
+
+Combat NPC physics calls CSWSCreature::UpdateSubareasOnMoveTo after updating the
+server position, as native movement does. Both passed-list and computed-list paths
+retain crossed-only triggers even when neither endpoint belongs to a subarea.
+Native OnEnterMine handles faction/reputation, immunity, scripts and one-shot
+removal. Detection auto-pause remains native. The focused GrenadeMineProbe launcher
+uses the isolated save profile and checks native grenade damage, walk/run/crossed
+mine entry and friendly passage without replaying the roster.

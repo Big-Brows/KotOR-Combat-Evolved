@@ -1,4 +1,5 @@
 // Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
+// Updated for KotOR:CE v0.2 on 2026-11-24; see docs/LOCAL_CHANGES.md.
 // Accessors of the packed-file base and of the resource-image container. The container models
 // themselves live in CExoPackedFile.h and CExoKeyTableFormats.h.
 
@@ -1485,8 +1486,7 @@ int CExoKeyTable::AddKeyTableContents(int)
         pTableBuf = ExoMalloc(tableBufSize);
 #else
         pTableBuf = EXOMALLOC(tableBufSize,
-            "source/"
-            "kotor2/CODE/libsource/exoresman/exoresfile.cpp", 991);
+            "libsource/exoresman/exoresfile.cpp", 991);
 #endif
         if (pTableBuf == NULL) {
             m_bValid = 0;
@@ -1526,8 +1526,7 @@ int CExoKeyTable::AddKeyTableContents(int)
                     ExoFree(pTableBuf);
 #else
                     EXOFREE(pTableBuf,
-                        "source/"
-                        "src/main/cpp/kotor2/CODE/libsource/exoresman/exoresfile.cpp", 1081);
+                        "libsource/exoresman/exoresfile.cpp", 1081);
 #endif
                     goto fail;
                 }
@@ -1550,8 +1549,7 @@ int CExoKeyTable::AddKeyTableContents(int)
                     ExoFree(pTableBuf);
 #else
                     EXOFREE(pTableBuf,
-                        "source/"
-                        "src/main/cpp/kotor2/CODE/libsource/exoresman/exoresfile.cpp", 1119);
+                        "libsource/exoresman/exoresfile.cpp", 1119);
 #endif
                     goto fail;
                 }
@@ -1596,8 +1594,7 @@ int CExoKeyTable::AddKeyTableContents(int)
         ExoFree(pTableBuf);
 #else
         EXOFREE(pTableBuf,
-            "source/"
-            "kotor2/CODE/libsource/exoresman/exoresfile.cpp", 1213);
+            "libsource/exoresman/exoresfile.cpp", 1213);
 #endif
         return 1;
     }

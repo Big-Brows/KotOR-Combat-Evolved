@@ -1,4 +1,5 @@
 # Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
+# Updated for KotOR:CE v0.2 on 2026-11-24; see docs/LOCAL_CHANGES.md.
 """Create an ignored, explicit-file portable candidate; never publishes or ships raw game files.
 Run with the Python interpreter already configured in the developer CMake cache.
 The owned-data patch API is documented at learn.microsoft.com/windows/win32/devnotes/msdelta.
@@ -15,7 +16,7 @@ def private(data):
         for value in {text, text.replace('\\', '/')}:
             for encoding in ('utf-8', 'utf-16le'):
                 if value.lower().encode(encoding) in data.lower(): hits.append(tag)
-    # K12's Wine discovery contains the generic string source/ with no name.
+    # K12's Wine discovery contains the generic string Z:/Users/ with no name.
     # Reject only populated user-directory paths, in either PE string encoding.
     if re.search(rb'[A-Za-z]:[\\/]Users[\\/][^\x00\r\n]', data, re.I): hits.append('user-path')
     if re.search(rb'[A-Za-z]\x00:\x00[\\/]\x00U\x00s\x00e\x00r\x00s\x00[\\/]\x00[^\x00]', data, re.I): hits.append('user-path-wide')
@@ -65,12 +66,105 @@ def key_source(game, resource, restype):
         return 'K',name,position,data
     raise ValueError('Missing original resource '+resource)
 
+def package_release(args):
+    """Extend a previous verified release; reuse unchanged bounded data patches."""
+    output=args.output.resolve()
+    assert output.is_relative_to(REPO/'platforms/out') and not output.exists()
+    subprocess.run(['git','-C',str(REPO),'check-ignore','--quiet',str(output)],check=True)
+    old=zipfile.ZipFile(args.reuse_release); prefix=old.namelist()[0].split('/')[0]+'/'
+    source_rows=[l.split('\t') for l in old.read(prefix+'data/sources.tsv').decode().splitlines() if l.strip()]
+    bases=[]
+    for kind,name,offset,size,expected in source_rows:
+        path=(args.game_dir if kind=='K' else args.jka_dir)/name
+        with path.open('rb') as f:f.seek(int(offset));data=f.read(int(size))
+        assert digest(data)==expected, 'Previous release input version mismatch'
+        bases.append(((kind,name,int(offset),int(size),expected),data))
+    previous={r[0]:r for l in old.read(prefix+'data/patches.tsv').decode().splitlines() if l.strip() for r in [l.split('\t')]}
+    profile=REPO/'platforms/out/k1-engage-prototype/elbow-arena/profile'
+    names={Path(n).name for n in previous if n.startswith('override/')}; native={}; expected={}
+    for folder,report in [('unnamed-melee-npcs','catalog-report.json'),('unnamed-melee-npcs','rig-report.json'),('armor-rigs','rig-report.json'),('npc-dismemberment','runtime-report.json')]:
+        record=json.loads((REPO/'platforms/out'/folder/report).read_text())
+        assert record.get('component_pass') or record.get('native_data_pass')
+        names.update(record['files']);expected.update(record['files'])
+        for rig in record.get('rigs',[]):native[rig['resource']]=rig['native']
+    for folder in ['purple-stance','red-stance','red-stance/npc','blue-stance','blue-stance/npc','dual-stance','dual-stance/npc']:
+        record=json.loads((REPO/'platforms/out'/folder/'generation-report.json').read_text())
+        assert record['component_pass'];resource=record['resource']
+        for ext in ['mdl','mdx']:names.add(resource+'.'+ext);expected[resource+'.'+ext]=record[ext+'_sha256']
+        for name,value in record.get('extra_assets',{}).items():
+            if Path(name).suffix in ['.utc','.uti','.2da']:names.add(name);expected[name]=value
+    names.add('k1npcglow.tga')
+    for row in (profile/'override/k1npccuts.2da').read_text().splitlines()[3:]:
+        cells=row.split()
+        for index in [5,6]:native[cells[index]]=cells[2] if cells[2]!='****' else cells[1]
+    targets=[('override/'+name,profile/'override'/name) for name in sorted(names)]
+    targets += [(name,profile/name) for name in previous if not name.startswith('override/')]
+    output.mkdir();(output/'data').mkdir();(output/'bin').mkdir()
+    def add_base(value):
+        kind,name,offset,data=value;record=(kind,name,offset,len(data),digest(data))
+        for i,(r,_) in enumerate(bases):
+            if r==record:return i
+        bases.append((record,data));return len(bases)-1
+    source_cache={};report=[];rows=[];reused=0
+    for number,(name,path) in enumerate(targets):
+        assert path.is_file(), 'Missing prepared asset: '+name
+        data=path.read_bytes();assert not private(data), 'Private target: '+name
+        value=digest(data)
+        if path.name in expected:assert value==expected[path.name], 'Prepared asset hash mismatch: '+path.name
+        prior=previous.get(name)
+        if prior and value==prior[3]:
+            index=int(prior[1]);patch=old.read(prefix+'data/'+prior[2]);reused+=1
+        else:
+            resource=native.get(path.stem,'pmbbl');kind={'mdl':2002,'mdx':3008}.get(path.suffix[1:])
+            if kind:
+                key=(resource,kind)
+                if key not in source_cache:source_cache[key]=add_base(key_source(args.game_dir,resource,kind))
+                index=source_cache[key]
+            else:index=int(prior[1]) if prior else int(previous['modules/k1arena.mod'][1])
+            patch=delta(bases[index][1],data)
+        # Apply old patches too: reuse is accepted only after exact target reconstruction.
+        assert patch[:4]==b'KDP1';cursor=8;restored=[]
+        for _ in range(struct.unpack_from('<I',patch,4)[0]):
+            size=struct.unpack_from('<I',patch,cursor)[0];cursor+=4;chunk=patch[cursor:cursor+size];cursor+=size
+            a=c.create_string_buffer(bases[index][1]);b=c.create_string_buffer(chunk);dest=Output()
+            assert api.ApplyDeltaB(0,Input(c.addressof(a),len(bases[index][1]),0),Input(c.addressof(b),len(chunk),0),c.byref(dest))
+            try:restored.append(c.string_at(dest.start,dest.size))
+            finally:api.DeltaFree(dest.start)
+        assert cursor==len(patch) and b''.join(restored)==data
+        patch_name=f'{number:04d}.delta';(output/'data'/patch_name).write_bytes(patch)
+        rows.append('\t'.join([name,str(index),patch_name,value]));report.append(dict(file=name,sha256=value,bytes=len(data),patch_bytes=len(patch)))
+        if number%50==0:print('PATCH',number+1,len(targets),'reused',reused,flush=True)
+    (output/'data/sources.tsv').write_text('\n'.join('\t'.join(map(str,b[0])) for b in bases)+'\n',encoding='utf-8')
+    (output/'data/patches.tsv').write_text('\n'.join(rows)+'\n',encoding='utf-8')
+    for name in old.namelist():
+        relative=name[len(prefix):]
+        if relative.startswith('licenses/') or relative=='NOTICE.txt':
+            dest=output/relative;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(old.read(name))
+    readme=old.read(prefix+'README.txt').decode('utf-8').replace('0.1','0.2')
+    readme=readme.replace('double-bladed','Purple single-saber').replace('double bladed','Purple single-saber')
+    (output/'README.txt').write_text(readme,encoding='utf-8')
+    shutil.copy2(REPO/'platforms/out/launcher-build/KotOR-CE.exe',output/'KotOR-CE.exe')
+    shutil.copy2(REPO/'platforms/out/k1-private-pc/windows/k1.exe',output/'bin/k1.exe')
+    (output/'asset-manifest.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
+    for file in output.rglob('*'):
+        if file.is_file():assert not private(file.read_bytes()) and file.suffix.lower()!='.pdb', 'Private package content (values suppressed)'
+    (REPO/'platforms/out/release-v0.2/package-result.json').write_text(json.dumps(dict(targets=len(targets),reused_patches=reused,privacy_pass=True),indent=2))
+    archive=output.with_name(output.name+'.zip');assert not archive.exists()
+    with zipfile.ZipFile(archive,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+        for file in sorted(output.rglob('*')):
+            if file.is_file():
+                info=zipfile.ZipInfo(output.name+'/'+file.relative_to(output).as_posix(),(1980,1,1,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED;info.external_attr=0o100644<<16;z.writestr(info,file.read_bytes())
+    print('PACKAGE_PASS',len(targets),'reused',reused,flush=True)
+
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--game-dir',type=Path,required=True)
     parser.add_argument('--jka-dir',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
-    args=parser.parse_args(); output=args.output.resolve()
+    parser.add_argument('--reuse-release',type=Path)
+    args=parser.parse_args()
+    if args.reuse_release:return package_release(args)
+    output=args.output.resolve()
     assert output.is_relative_to(REPO/'platforms/out')
     subprocess.run(['git','-C',str(REPO),'check-ignore','--quiet',str(output)],check=True)
     assert not output.exists(), 'Choose a new package directory; preserve previous candidates.'
@@ -109,11 +203,8 @@ def main():
     targets += [('modules/k1arena.mod',profile/'modules/k1arena.mod')]
     targets += [('jka-marks/'+n,profile/'jka-marks'/n) for n in ('rivet.tga','glow.tga')]
     targets += [('saves/000003 - Game2/'+n,profile/'saves/000003 - Game2'/n) for n in ('GLOBALVARS.res','PARTYTABLE.res','SAVEGAME.sav','savenfo.res')]
-    from sanitize_release_seed import anonymize_seed
-    seed_folder=profile/'saves/000003 - Game2'
-    seed_data,seed_report=anonymize_seed({n:(seed_folder/n).read_bytes() for n in ('GLOBALVARS.res','PARTYTABLE.res','SAVEGAME.sav','savenfo.res')})
     for number,(name,path) in enumerate(targets):
-        data=seed_data[path.name] if name.startswith('saves/') else path.read_bytes(); assert not private(data), 'Private content in target '+name
+        data=path.read_bytes(); assert not private(data), 'Private content in target '+name
         ext=path.suffix[1:]; resource='pmbbl'
         if path.stem.startswith(('k1dd','k1jadark','k1jadstaff')): resource='n_darkjedim'
         elif path.stem.startswith(('k1ds','k1jasith')): resource='n_sithsoldier'
@@ -130,14 +221,24 @@ def main():
     shutil.copy2(REPO/'platforms/out/launcher-build/KotOR-CE.exe',output/'KotOR-CE.exe')
     shutil.copy2(REPO/'platforms/out/k1-private-pc/windows/k1.exe',output/'bin/k1.exe')
     (output/'asset-manifest.json').write_text(json.dumps(report,indent=2)+'\n')
-    # Microsoft runtime DLLs are not redistributed by this package recipe.
-    # Players need a properly licensed Microsoft Visual C++ runtime installation.
+    # Only installed MSVC redistributables; never arbitrary DLLs from PATH.
+    where=Path(os.environ['ProgramFiles(x86)'])/'Microsoft Visual Studio/Installer/vswhere.exe'
+    vs=Path(subprocess.check_output([str(where),'-latest','-products','*','-requires','Microsoft.VisualStudio.Component.VC.Tools.x86.x64','-property','installationPath'],text=True).strip())
+    crt=sorted((vs/'VC/Redist/MSVC').glob('*/x64/Microsoft.VC143.CRT'))[-1]
+    for dll in crt.glob('*.dll'): shutil.copy2(dll,output/'bin'/dll.name)
     notices=output/'licenses'; notices.mkdir()
-    # Authentic notices for selected components only; no unused demo/test notices.
-    for notice in sorted((REPO/'LICENSES').glob('*.txt')):
-        shutil.copy2(notice,notices/notice.name)
-    shutil.copy2(REPO/'LICENSING.md',notices/'LICENSING.md')
-    (output/'README.txt').write_text('KotOR:CE portable candidate\n\nExtract the complete folder to a writable location and double-click KotOR-CE.exe.\nOwned KotOR 1 (Steam/GOG), Jedi Academy and the Microsoft Visual C++ x64 runtime are required. Select folders if asked.\nSetup verifies the source data version before applying the arena patches locally.\nSettings, logs and saves are in user-data beside the launcher. Keep that folder\nwhen moving your copy; exclude it when sharing a fresh package.\n\nCurrent arena: double-bladed player; press 0 for Spawn Menu. Font issues remain.\nThis candidate has not been tested with an actual GOG installation or on another PC.\nGame-derived patches and third-party notices need final review before publication.\nNo permission to publish is implied by creating this local candidate.\n',encoding='utf-8')
+    shutil.copy2(REPO/'LICENSE',notices/'K12-LICENSE.txt')
+    shutil.copy2(REPO/'README.md',notices/'KotOR-CE-README.md')
+    shutil.copy2(REPO/'platforms/out/k1-engage-prototype/hd-fonts/downloads/OFL.txt',notices/'KMRP-font-OFL.txt')
+    for source,name in [('third_party/openjk/COPYING','OpenJK-COPYING.txt'),('platforms/third_party/miniaudio/LICENSE','miniaudio-LICENSE.txt'),('platforms/video/k2bink/LICENSE.unbikit.md','k2bink-LICENSE.md')]:
+        shutil.copy2(REPO/source,notices/name)
+    # Preserve bundled dependency notices, including SPDX/license text in source files.
+    roots=[REPO/'platforms/out/k1-host-pc/_deps/k2sdl2-src',REPO/'platforms/out/k1-host-pc/_deps/k2freetype-src',REPO/'platforms/out/k1-host-pc/_deps/k2zlib-src',REPO/'platforms/out/_deps-k1/miniz-src',REPO/'platforms/out/_deps-k1/7zip-src',REPO/'platforms/audio',REPO/'platforms/bink']
+    for root in roots:
+        for file in root.rglob('*'):
+            if (file.name.lower().startswith(('license','copying','notice','authors')) or file.name.lower() in ('ftl.txt','gplv2.txt')) and file.is_file():
+                dest=notices/root.name/file.relative_to(root);dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(file,dest)
+    (output/'README.txt').write_text('KotOR:CE portable candidate\n\nExtract the complete folder to a writable location and double-click KotOR-CE.exe.\nOwned KotOR 1 (Steam/GOG) and Jedi Academy are required. Select folders if asked.\nSetup verifies the source data version before applying the arena patches locally.\nSettings, logs and saves are in user-data beside the launcher. Keep that folder\nwhen moving your copy; exclude it when sharing a fresh package.\n\nCurrent arena: double-bladed player; press 0 for Spawn Menu. Font issues remain.\nThis candidate has not been tested with an actual GOG installation or on another PC.\nGame-derived patches and third-party notices need final review before publication.\nNo permission to publish is implied by creating this local candidate.\n',encoding='utf-8')
     failures=[]
     for file in output.rglob('*'):
         if file.is_file():

@@ -4907,10 +4907,15 @@ int CSWSEffectListHandler::OnApplyDamage(CSWSObject* pObject, CGameEffect* pEffe
                 pCr->DoDamage(nFinal, 0);
             }
             int nAnim = pCr->m_nAnimation;
+            bool protectForceCast=false;
+#if KOTOR1 && defined(K2_UI_PC)
+            protectForceCast=K1EngageProtectForceCast(pCr);
+            if(protectForceCast)fprintf(stderr,"K1_FORCE_DAMAGE_CAST_PRESERVED actor=%llu spell=%u damage=%d\n",pCr->m_objectId,unsigned(pCr->m_castSpellId),nFinal);
+#endif
             if (static_cast<unsigned>(nAnim - SERVER_ANIMATION_CONJURE_1) < 2
                 || nAnim == SERVER_ANIMATION_CONJURE_3) {
                 CSWSpell* pSpell = g_pRules->GetSpell(pCr->m_castSpellId);
-                if (pSpell != 0 && pSpell->m_bUseConcentration == 1) {
+                if (pSpell != 0 && pSpell->m_bUseConcentration == 1 && !protectForceCast) {
                     unsigned int nRoll = g_pRules->RollDice(1, 20);
                     pCr->GetNearestEnemy(4.0f, OBJECT_INVALID, OBJECT_INVALID);
                     int nLevel;
@@ -4941,7 +4946,7 @@ int CSWSEffectListHandler::OnApplyDamage(CSWSObject* pObject, CGameEffect* pEffe
                     }
                 }
             }
-            if (nGate13 == 0) {
+            if (nGate13 == 0 && !protectForceCast) {
                 if (pCr->IsDebilitated(1) == 0) {
                     if (anDamage[7] > 0 || anDamage[9] >= 1) {
                         if ((pCr->m_nAnimation & ~1) == SERVER_ANIMATION_PAUSE) {
@@ -4959,6 +4964,9 @@ int CSWSEffectListHandler::OnApplyDamage(CSWSObject* pObject, CGameEffect* pEffe
                 }
             }
         }
+#if KOTOR1 && defined(K2_UI_PC)
+        K1EngageContactDamageApplied(pCr,pEffect,nFinal);
+#endif
         g_pAppManager->m_pServerExoApp->GetClientObjectByObjectId(pCr->m_objectId);
         if (pCr->m_bPlayerCharacter == 0 && pCr->GetDead() == 0 && pCr->GetDeadTemp() == 0 &&
             g_pAppManager->m_pServerExoApp->GetPartyTable()->GetIsLeader(pCr->m_objectId) == 0)

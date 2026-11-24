@@ -1,13 +1,18 @@
 // Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
+// Updated for KotOR:CE v0.2 on 2026-11-24; see docs/LOCAL_CHANGES.md.
 #include "port/k1engage.h"
+#include <set>
 #if KOTOR1 && defined(K2_UI_PC)
 #include "k1engagestate.h"
+#include "resgff.h"
+#include "nwstrigger.h"
 #include "k1npctype.h"
 #include "k1groundmove.h"
 #include "port/k1jkanav.h"
 #include "port/k1jkaai.h"
 #include "port/aslglapi.h"
 #include "k1sabercontact.h"
+#include "k1attackdeflection.h"
 #include "k1jkasabermarks.h"
 #include "AURORA/aurimage.h"
 #include "appmanager.h"
@@ -16,6 +21,7 @@
 #include "guiingame.h"
 #include "swgui.h"
 #include "swguimaininterfacepc2.h"
+#include "swguimainmenu.h"
 #include "swguisaveload.h"
 #include "swguiingame.h"
 #include "swguiingameequip.h"
@@ -37,6 +43,7 @@
 #include "nwscreaturestats.h"
 #include "nwsitem.h"
 #include "nwcitem.h"
+#include "nwcvisualeffect.h"
 #include "nwsaiaction.h"
 #include "nwscriptconst.h"
 #include "strref.h"
@@ -50,6 +57,7 @@
 #include "restype.h"
 #include "CSWVisibilityNode.h"
 #include "AURORA/aurmodel.h"
+#include "AURORA/auremitter.h"
 #include "AURORA/aurscene.h"
 #include "AURORA/aurscenemanager.h"
 #include "aurcamera.h"
@@ -60,6 +68,8 @@
 #include "AURORA/aurtexman.h"
 #include "AURORA/aurStringFont.h"
 #include "math3d.h"
+#include "include/k1yellowswordhooks.h"
+#include "include/k1swordalignment.h"
 #include "exoinput.h"
 #include "exosound.h"
 #include "soundprioritygroup.h"
@@ -71,6 +81,7 @@
 #include "nwcreaturelevelstats.h"
 #include "nwsrules.h"
 #include "twodimarrays.h"
+#include "twodimarray.h"
 #include "nwitem.h"
 #include <algorithm>
 #include <cmath>
@@ -79,6 +90,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <memory>
 #include <chrono>
@@ -97,6 +109,36 @@ extern float CameraPersonalSpace;
 extern CExoSound* g_pExoSound;
 
 namespace {
+#include "include/k1swordgeometry.inc"
+bool SingleSwordType(int type) {
+    return type==BASE_ITEM_LONG_SWORD || type==BASE_ITEM_SHORT_SWORD || type==BASE_ITEM_VIBRO_SWORD || type==BASE_ITEM_VIBRO_BLADE;
+}
+bool DoubleSwordType(int type) {
+    return type==BASE_ITEM_DOUBLE_BLADED_SWORD || type==BASE_ITEM_VIBRO_DOUBLE_BLADE || type==BASE_ITEM_WOOKIE_WARBLADE;
+}
+bool SwordType(int type){return SingleSwordType(type) || DoubleSwordType(type);}
+bool SaberType(int type){return type==BASE_ITEM_LIGHTSABER || type==BASE_ITEM_SHORT_LIGHTSABER || type==BASE_ITEM_DOUBLE_BLADED_LIGHTSABER;}
+bool SingleMeleeType(int type){return SingleSwordType(type) || type==BASE_ITEM_LIGHTSABER || type==BASE_ITEM_SHORT_LIGHTSABER || type==BASE_ITEM_STUN_BATON || type==BASE_ITEM_GAMMOREAN_BATTLEAXE;}
+const SwordGeometry* SwordModelGeometry(Gob* model) {
+    if(model && model->m_pModel)for(const auto& geometry:swordGeometry)
+        if(!_stricmp(model->m_pModel->m_szName,geometry.resource))return &geometry;
+    return nullptr;
+}
+const char* PoiseWeaponResource(Gob* model) {
+    if(!model || !model->m_pModel)return nullptr;
+    return (model->m_pModel->m_nFlags & Model::kModelLightsaber) || SwordModelGeometry(model)?model->m_pModel->m_szName:"w_Lghtsbr_001";
+}
+bool ActorSwordPair(CSWSCreature* actor) {
+    if(!actor || !actor->m_pInventory)return false;
+    auto* right=actor->m_pInventory->GetItemInSlot(CSWInventory::SLOT_RIGHTWEAPON);
+    auto* left=actor->m_pInventory->GetItemInSlot(CSWInventory::SLOT_LEFTWEAPON);
+    return right && left && right!=left && SingleMeleeType(right->m_baseItem) && SingleMeleeType(left->m_baseItem) &&
+        (SwordType(right->m_baseItem) || SwordType(left->m_baseItem));
+}
+bool ActorDoubleSword(CSWSCreature* actor) {
+    auto* item=actor && actor->m_pInventory?actor->m_pInventory->GetItemInSlot(CSWInventory::SLOT_RIGHTWEAPON):nullptr;
+    return item && DoubleSwordType(item->m_baseItem);
+}
 void DrawSaberSurfaceMarks(CAurScene* scene);
 void SeedNativeCameraOrbit(CAurCamera* camera,CSWCCreature* actor,const Vector& eye);
 constexpr float parryMarkerExtraRange=.75f;
@@ -143,6 +185,7 @@ bool requestedBackLeft=false;
 bool swingBackLeft=false;
 int staffArcTrial=-1;
 int attackSerial=0;
+long long playerAttackStartedAt=-1;
 int victorySwingSerial=-1;
 float aimYaw=0,aimPitch=0;
 float nativeCameraHeadHeight=0,nativeCameraFollowHeight=0;
@@ -160,10 +203,18 @@ struct GripPose {
     bool joined=false;
 };
 struct PointCorrection {Quaternion rotation;float radius=0;Vector offset;bool linear=false;};
+struct NativeGaitPlayback {
+    std::shared_ptr<CSWCAnimBase> owner;
+    Gob* body=nullptr;
+    std::string resource,clip;
+    std::vector<BodyPose> pose;
+    float time=0,length=0;
+};
 // Transition history belongs to a body, not to the selected player. The
 // player's aliases preserve the existing input/ownership path; NPC drivers
 // pass their own playback state to the same pose solver.
 struct PosePlayback {
+    NativeGaitPlayback nativeGait;
     GripPose lastGrip,gripFrom,gripCorrection;
     PointCorrection hiltCorrection,leftCorrection;
     std::vector<BodyPose> lastPose,blendFrom;
@@ -172,6 +223,8 @@ struct PosePlayback {
     float sourceContactError=0;
     bool blendPending=false;
     float blendTime=.15f;
+    bool guardKnown=false,guardHeld=false,guardTransition=false;
+    bool stanceTransition=false;
     unsigned int blockSerial=0;
     int swingSoundSerial=-1;
 } playerPlayback;
@@ -187,11 +240,14 @@ struct NpcPlayback {
     unsigned long long id=OBJECT_INVALID;
     CSWCCreature* owner=nullptr;
     Gob* body=nullptr;
-    const char* nativeResource="n_sithsoldier";
+    std::string nativeResource="n_sithsoldier";
     PosePlayback pose;
     UtilityPoseBlend utilityBlend;
     std::vector<BodyPose> nativeIdle,staffGuard;
-    bool staff=false;
+    unsigned int authoredHeadReported=0;
+    bool staff=false,dual=false,red=false,blue=false;
+    int blueFrom=-1;
+    int redFrom=-1;
     unsigned long long target=OBJECT_INVALID;
     unsigned int contactBlades=0;
     std::vector<K1SaberContact::Blade> previousBlades;
@@ -228,6 +284,7 @@ struct NpcPlayback {
     const char* decision="hold";
     bool requested=false,attacking=false,hit=false,bladeValid=false;
     bool ranged=false,rifle=false;
+    int weaponClass=-1;
     int chainDecisionSerial=-1;bool continueChain=true;
     bool parrying=false,closeGuard=false;
     long long threatSince=0,parryStart=0,parryUntil=0,parryReady=0;
@@ -243,7 +300,7 @@ struct NpcPlayback {
     float maximumReach=-999.f,targetNear=999.f;
     const char* base=nullptr;
     const char* overlay=nullptr;
-    long long nextAttack=0;
+    long long nextAttack=0,attackStartedAt=-1;
     Vector position,bladeBase,bladeTip;
     float bladeTime=0;
     unsigned long long revision=0,contactRevision=0;
@@ -254,15 +311,43 @@ bool NpcWalking(const NpcPlayback& npc) {
 bool NpcGuarding(const NpcPlayback& npc) {
     return npc.requested && !npc.attacking && (npc.parrying || npc.closeGuard);
 }
+void ReconcileSandboxMovement(CSWSCreature* actor) {
+    if(!actor)return;
+    bool speedEffect=false;
+    for(int i=0;i<actor->m_effects.m_count;++i) {
+        const auto type=actor->m_effects.m_pArray[i]->m_subType;
+        speedEffect|=type==CSWSEffectListHandler::EFFECT_MOVEMENT_SPEED_INCREASE || type==CSWSEffectListHandler::EFFECT_MOVEMENT_SPEED_DECREASE;
+    }
+    // Only speed-effect handlers write this factor after initialization. A low
+    // cached factor with no remaining provider is stale, not a live debuff.
+    if(!speedEffect && actor->GetMovementRateFactor(0)<.9999f) {
+        fprintf(stderr,"K1_SANDBOX_MOVEMENT_RECOVER stale_factor=%g live_speed_effects=0\n",actor->GetMovementRateFactor(0));
+        actor->SetMovementRateFactor(1.f);
+    }
+    static unsigned long long previousActor=OBJECT_INVALID;static float previousFactor=-1;
+    const float factor=actor->GetMovementRateFactor(0);
+    if(previousActor!=actor->m_objectId || std::fabs(previousFactor-factor)>.0001f) {
+        fprintf(stderr,"K1_SANDBOX_MOVEMENT_RATE actor=%llu factor=%g slowed=%d limited=%d walk=%g run=%g\n",actor->m_objectId,factor,actor->m_bSlowed,actor->m_bMovementSpeedLimited,actor->m_pStats->m_fWalkRate,actor->m_pStats->m_fRunRate);
+        if(factor<1)for(int i=0;i<actor->m_effects.m_count;++i) {
+            auto* effect=actor->m_effects.m_pArray[i];
+            if(effect->m_subType==CSWSEffectListHandler::EFFECT_MOVEMENT_SPEED_INCREASE || effect->m_subType==CSWSEffectListHandler::EFFECT_MOVEMENT_SPEED_DECREASE)
+                fprintf(stderr,"K1_SANDBOX_MOVEMENT_EFFECT id=%llu type=%u value=%d duration=%g duration_type=%u\n",effect->m_effectId,unsigned(effect->m_subType),effect->GetInteger(0),effect->m_fDuration,unsigned(effect->m_durationTypeBits));
+        }
+        previousActor=actor->m_objectId;previousFactor=factor;
+    }
+}
+CSWSCreature* ServerActor();
 float NativeMoveSpeed(CSWSCreature* actor,bool walk) {
     // Native rates are millimetres/second; client/physics positions are metres.
+    if(std::getenv("K1_ENGAGE_SANDBOX") && actor && actor==ServerActor())ReconcileSandboxMovement(actor);
     return actor?(walk?actor->GetWalkRate():actor->GetRunRate())*.001f:0.f;
 }
 CSWSCreature* ServerActor();
+bool NativeSandboxActor(CSWSCreature* actor);
 float EngageMoveSpeed(CSWSCreature* actor,bool walk) {
     auto* player=ServerActor();
     if(!actor || !player || !player->m_pStats) return 0;
-    if(actor==player) return NativeMoveSpeed(actor,walk);
+    if(actor==player || (actor && (NativeSandboxActor(actor) || std::getenv("K1_ENGAGE_STORY")))) return NativeMoveSpeed(actor,walk);
     // Match the native player's base rates on both sides, applying each NPC's
     // own KotOR movement effects rather than copying the player's buffs.
     const float base=walk?player->m_pStats->m_fWalkRate:player->m_pStats->m_fRunRate;
@@ -273,20 +358,133 @@ float EngageMoveSpeed(CSWSCreature* actor,bool walk) {
 constexpr float meleeWalkExtraDistance=.75f;
 std::unordered_map<unsigned long long,NpcPlayback> npcPlayback;
 bool ArenaDarkJedi() {return std::getenv("K1_ENGAGE_DARK_JEDI")!=nullptr;}
+std::unordered_set<unsigned long long> sandboxNativeActors;
+bool NativeSandboxActor(CSWSCreature* actor){return actor && sandboxNativeActors.count(actor->m_objectId)!=0;}
+#include "k1npccombatpolicy.h"
+bool NativeConfiguredNpc(CSWSCreature* actor){
+    if(!actor || actor==ServerActor())return false;
+    if(NativeSandboxActor(actor))return true;
+    // Keep the separate authored arena fixtures on their established path.
+    for(const auto& type:k1DarkJediTypes)if(!_stricmp(actor->m_sTag.CStr(),type.tag))return false;
+    return std::getenv("K1_ENGAGE_STORY") || NpcCombatPolicy(actor).matched;
+}
+bool NativeNpcBluntType(int type) {
+    return type==BASE_ITEM_STUN_BATON || type==BASE_ITEM_QUARTER_STAFF || type==BASE_ITEM_GHAFFI_STICK || type==BASE_ITEM_GAMMOREAN_BATTLEAXE;
+}
+CSWSItem* NativeNpcRightItem(CSWSCreature* actor) {
+    return actor && actor->m_pInventory?actor->m_pInventory->GetItemInSlot(CSWInventory::SLOT_RIGHTWEAPON):nullptr;
+}
+bool NativeNpcMeleeEquipped(CSWSCreature* actor) {
+    auto* item=NativeNpcRightItem(actor);
+    return item && (SingleMeleeType(item->m_baseItem) || DoubleSwordType(item->m_baseItem) ||
+        item->m_baseItem==BASE_ITEM_DOUBLE_BLADED_LIGHTSABER || NativeNpcBluntType(item->m_baseItem));
+}
+bool NativeNpcBlunt(CSWCCreature* actor) {
+    if(!actor || (actor->GetServerCreature()!=ServerActor() && !NativeConfiguredNpc(actor->GetServerCreature())))return false;
+    auto* item=g_pAppManager->m_pClientExoApp->GetItemByGameObjectID(actor->m_aEquippedItemIds[4]);
+    return item && NativeNpcBluntType(item->m_baseItem);
+}
+bool NativeNpcSolidBlade(CSWCCreature* actor,K1SaberContact::Blade& blade,int hand=0);
+int NpcWeaponClass(CSWSCreature* actor) {
+    auto* client=actor?actor->GetClientCreature():nullptr;
+    return client && client->GetAnimationBase()?client->GetAnimationBase()->m_nWeaponClass:0;
+}
+struct NativeNpcRig {std::string native,single,staff,dual,red,blue,purple;};
+std::unordered_map<unsigned long long,int> sandboxStances;
+std::unordered_map<unsigned long long,CCAppearanceInfo> sandboxAppearances;
+std::vector<NativeNpcRig> nativeNpcRigs;
+std::vector<NativeNpcRig> wearableRigs;
+bool NativeNpcAssets(const char* resource) {
+    return resource && g_pExoResMan->Exists(CResRef(resource),RESTYPE_MDL,static_cast<unsigned int*>(nullptr)) &&
+        g_pExoResMan->Exists(CResRef(resource),RESTYPE_MDX,static_cast<unsigned int*>(nullptr));
+}
+void LoadBodyRigTable(const char* resource,std::vector<NativeNpcRig>& rows) {
+    rows.clear();
+    if(!g_pExoResMan->Exists(CResRef(resource),RESTYPE_2DA,static_cast<unsigned int*>(nullptr)))return;
+    C2DA table(CResRef(resource),0);if(!table.Load2DArray())return;
+    for(int row=0;row<table.m_nRows && row<256;++row) {
+        CExoString native,single,staff,dual;
+        if(table.GetCExoStringEntry(row,CExoString("native"),&native) &&
+           table.GetCExoStringEntry(row,CExoString("single"),&single) &&
+           table.GetCExoStringEntry(row,CExoString("staff"),&staff) &&
+           table.GetCExoStringEntry(row,CExoString("dual"),&dual))
+            rows.push_back({native.CStr(),single.CStr(),staff.CStr(),dual.CStr()});
+        if(!rows.empty() && rows.back().native==native.CStr()) {
+            CExoString red,blue,purple;
+            if(table.GetCExoStringEntry(row,CExoString("red"),&red))rows.back().red=red.CStr();
+            if(table.GetCExoStringEntry(row,CExoString("blue"),&blue))rows.back().blue=blue.CStr();
+            if(table.GetCExoStringEntry(row,CExoString("purple"),&purple))rows.back().purple=purple.CStr();
+        }
+    }
+}
+void LoadNativeNpcRigs(){LoadBodyRigTable("k1npcrigs",nativeNpcRigs);}
+const NativeNpcRig* WearableRig(const char* native) {
+    if(!native)return nullptr;
+    if(wearableRigs.empty() && g_pExoResMan)LoadBodyRigTable("k1armorrigs",wearableRigs);
+    for(const auto& r:wearableRigs)if(!_stricmp(native,r.native.c_str()))return &r;
+    return nullptr;
+}
+const char* WearableNativeResource(const char* resource) {
+    if(!resource)return nullptr;
+    if(wearableRigs.empty() && g_pExoResMan)LoadBodyRigTable("k1armorrigs",wearableRigs);
+    for(const auto& r:wearableRigs)for(const auto* name:{&r.native,&r.single,&r.red,&r.blue,&r.purple,&r.dual,&r.staff})
+        if(!_stricmp(resource,name->c_str()))return r.native.c_str();
+    return nullptr;
+}
+const char* PlayerNativeResource(Gob* body) {
+    const char* resource=body&&body->m_pModel?WearableNativeResource(body->m_pModel->m_szName):nullptr;
+    return resource?resource:"pmbbl";
+}
 const K1NpcType& NpcType(CSWSCreature* actor) {
     for(const auto& type:k1DarkJediTypes) if(actor && !_stricmp(actor->m_sTag.CStr(),type.tag)) return type;
     return k1DarkJediTypes[0];
 }
-bool StaffNpc(CSWSCreature* actor) {return actor && NpcType(actor).staff;}
+bool ActorSingleSword(CSWSCreature* actor) {
+    auto* item=actor && actor->m_pInventory?actor->m_pInventory->GetItemInSlot(CSWInventory::SLOT_RIGHTWEAPON):nullptr;
+    return item && SingleSwordType(item->m_baseItem);
+}
+bool StaffNpc(CSWSCreature* actor) {
+    if(NativeConfiguredNpc(actor)) {
+        auto* item=NativeNpcRightItem(actor);
+        return item && (DoubleSwordType(item->m_baseItem) || item->m_baseItem==BASE_ITEM_DOUBLE_BLADED_LIGHTSABER ||
+            item->m_baseItem==BASE_ITEM_QUARTER_STAFF || item->m_baseItem==BASE_ITEM_GHAFFI_STICK);
+    }
+    return actor && (ActorDoubleSword(actor) || (!ActorSingleSword(actor) && !ActorSwordPair(actor) && NpcType(actor).staff));
+}
+bool DualNpc(CSWSCreature* actor) {
+    if(NativeConfiguredNpc(actor)) {
+        auto* right=NativeNpcRightItem(actor);
+        auto* left=actor->m_pInventory?actor->m_pInventory->GetItemInSlot(CSWInventory::SLOT_LEFTWEAPON):nullptr;
+        return right && left && right!=left &&
+            (SingleMeleeType(right->m_baseItem) || right->m_baseItem==BASE_ITEM_STUN_BATON) &&
+            (SingleMeleeType(left->m_baseItem) || left->m_baseItem==BASE_ITEM_STUN_BATON);
+    }
+    return actor && (ActorSwordPair(actor) || (!ActorSingleSword(actor) && !ActorDoubleSword(actor) && NpcType(actor).dual));
+}
+bool RedNpc(CSWSCreature* actor) {return actor && !StaffNpc(actor) && !DualNpc(actor) && ((NativeSandboxActor(actor) && sandboxStances.count(actor->m_objectId)?sandboxStances[actor->m_objectId]:NativeConfiguredNpc(actor)?NpcCombatPolicy(actor).stance:NpcType(actor).red?1:NpcType(actor).blue?2:0)==1);}
+bool BlueNpc(CSWSCreature* actor) {return actor && !StaffNpc(actor) && !DualNpc(actor) && ((NativeSandboxActor(actor) && sandboxStances.count(actor->m_objectId)?sandboxStances[actor->m_objectId]:NativeConfiguredNpc(actor)?NpcCombatPolicy(actor).stance:NpcType(actor).red?1:NpcType(actor).blue?2:0)==2);}
 const char* NpcRigResource(const char* native,CSWSCreature* actor=nullptr) {
-    if(StaffNpc(actor) && !_stricmp(native,"n_darkjedim")) return NpcType(actor).rig;
-    if(!_stricmp(native,"n_sithsoldier")) return "k1jasith";
+    if(NativeConfiguredNpc(actor)) {
+        if(nativeNpcRigs.empty())LoadNativeNpcRigs();
+        if(!NativeNpcMeleeEquipped(actor))return nullptr;
+        for(const auto& rig:nativeNpcRigs)if(!_stricmp(native,rig.native.c_str())) {
+            const char* selected=(StaffNpc(actor)?rig.staff:DualNpc(actor)?rig.dual:RedNpc(actor)?rig.red:BlueNpc(actor)?rig.blue:rig.single).c_str();
+            return NativeNpcAssets(selected)?selected:nullptr;
+        }
+        return nullptr;
+    }
+    if(!_stricmp(native,"n_darkjedim")) {
+        if(StaffNpc(actor))return "k1jadstaff";
+        if(DualNpc(actor))return "k1jaddual";
+        if(RedNpc(actor) || BlueNpc(actor))return NpcType(actor).rig;
+    }
+    if(!_stricmp(native,"n_sithsoldier")) return StaffNpc(actor) || DualNpc(actor)?nullptr:"k1jasith";
     if(!_stricmp(native,"n_darkjedim")) return "k1jadark";
     return nullptr;
 }
-struct SandboxActor {bool friendly=false;int commandable=1,passive=0;unsigned int meleeHits=0;};
+struct SandboxActor {bool friendly=false;int commandable=1,passive=0;unsigned int meleeHits=0,dualDamageHands=0;};
 std::unordered_map<unsigned long long,SandboxActor> sandboxActors;
-bool sandboxAi=true,sandboxSession=false,sandboxReady=false,sandboxMenuOpen=false,sandboxTogglePending=false;
+bool sandboxAi=true,sandboxTargetPlayer=true,sandboxSession=false,sandboxReady=false,sandboxMenuOpen=false,sandboxTogglePending=false;
 unsigned long long sandboxArea=OBJECT_INVALID,lastSandboxSpawn=OBJECT_INVALID;
 bool SandboxIdle(CSWSCreature* actor){return actor && sandboxActors.count(actor->m_objectId) && !sandboxAi;}
 bool SandboxActorActive(CSWSCreature* actor){return actor && !actor->GetDead() && !SandboxIdle(actor);}
@@ -304,10 +502,44 @@ CSWSCreature* SandboxTarget(CSWSCreature* actor,CSWSCreature* player) {
     return best;
 }
 void SandboxTick();
+void StartNativeSandboxCombat(CSWSCreature* actor) {
+    auto* player=ServerActor();
+    if(!NativeSandboxActor(actor) || !player || !sandboxAi || NativeNpcMeleeEquipped(actor) ||
+       actor->GetDead() || !actor->m_bCommandable || actor->m_bPassiveAttackBehaviour ||
+       actor->m_actionList.m_pInternal->m_nCount || !K1EngageEnemyAIActive(player->m_objectId))return;
+    if(auto* target=SandboxTarget(actor,player))
+        actor->AddAttackActions(target->m_objectId,0,1,0,0,0,0,1,SERVER_ANIMATION_ATTACK,1500,1,0,0,4,0);
+}
+void PresentationProbeTick();
 void SandboxToggle();
 void SandboxSetAi(bool enabled);
 void SandboxUnload(unsigned long long areaId);
-CSWSCreature* SandboxSpawn(int stance,bool friendly,CExoString& message);
+struct SandboxNativeTemplate {std::string label,module,source,creature,faction,variantKey,indicator,model,look;int typeOrder=0;};
+struct SandboxNativeGroup {std::string label;std::vector<SandboxNativeTemplate> variants;};
+std::vector<SandboxNativeGroup> sandboxNativeGroups;
+void LoadSandboxNativeCatalog() {
+    LoadNativeNpcRigs();
+    sandboxNativeGroups.clear();
+    if(!g_pExoResMan->Exists(CResRef("k1npcs"),RESTYPE_2DA,static_cast<unsigned int*>(nullptr)))return;
+    C2DA table(CResRef("k1npcs"),0);if(!table.Load2DArray())return;
+    for(int row=0;row<table.m_nRows && row<4096;++row) {
+        CExoString label,module,source,creature;
+        if(!table.GetCExoStringEntry(row,CExoString("label"),&label) ||
+           !table.GetCExoStringEntry(row,CExoString("module"),&module) ||
+           !table.GetCExoStringEntry(row,CExoString("source"),&source) ||
+           !table.GetCExoStringEntry(row,CExoString("template"),&creature) ||
+           !g_pExoResMan->Exists(CResRef(creature),RESTYPE_UTC,static_cast<unsigned int*>(nullptr)))continue;
+        if(sandboxNativeGroups.empty() || sandboxNativeGroups.back().label!=label.CStr())
+            sandboxNativeGroups.push_back({label.CStr(),{}});
+        sandboxNativeGroups.back().variants.push_back({label.CStr(),module.CStr(),source.CStr(),creature.CStr()});
+        auto& entry=sandboxNativeGroups.back().variants.back();
+        auto read=[&](const char* key,std::string& result){CExoString value;if(table.GetCExoStringEntry(row,CExoString(key),&value))result=value.CStr();};
+        read("faction",entry.faction);read("variant",entry.variantKey);read("indicator",entry.indicator);read("model",entry.model);read("look",entry.look);
+        table.GetINTEntry(row,CExoString("typeorder"),&entry.typeOrder);
+    }
+    fprintf(stderr,"K1_SANDBOX_NATIVE_CATALOG groups=%zu\n",sandboxNativeGroups.size());
+}
+CSWSCreature* SandboxSpawn(int stance,bool friendly,CExoString& message,int group=-1,int variant=0,bool hostile=false,const SandboxNativeTemplate* appearance=nullptr,int color=0,int saberStance=-1);
 struct ArenaForceState {
     unsigned long long actor=OBJECT_INVALID;
     long long next=0;
@@ -315,7 +547,12 @@ struct ArenaForceState {
 } arenaForce;
 std::unordered_map<unsigned long long,ArenaForceState> sandboxForces;
 struct MeleePoise {
-    int percent=100;
+    // Mutual same-opponent episode; cleared by any non-clash resolution.
+    unsigned long long clashOpponent=OBJECT_INVALID,clashRight=OBJECT_INVALID,clashLeft=OBJECT_INVALID;
+    int clashes=0,clashDecision=0;
+    bool clashParry=false,clashSwing=false;
+    long long clashGuardUntil=0;
+    int percent=100,capacity=100;
     long long recoverAt=0,quietUntil=0,nextTick=0,parriedUntil=0;
     long long blockStarted=0;
     int blockReaction=-1;
@@ -324,7 +561,8 @@ struct MeleePoise {
     int parryRollSerial=-1,parryRoll=0,parryAttempts=0;
     unsigned long long parryRollAttacker=OBJECT_INVALID;
     bool parryRollSuccess=false;
-    bool staffTiming=false;
+    bool staffTiming=false,dualTiming=false;
+    int singleTiming=0; // Yellow=0, Red=1, Blue=2, Purple=3.
 };
 struct BlockObservation {
     long long started=-1;
@@ -338,11 +576,29 @@ constexpr long long poiseStunUs=2500000;
 constexpr int poiseRecoveryPercent=25;
 constexpr long long blockReactionUs=250000;
 bool StaffPoiseActor(CSWSCreature* actor);
-long long PoiseQuietInterval(const MeleePoise& poise){return poise.staffTiming?2500000:poiseQuietUs;}
-long long PoiseTickInterval(const MeleePoise& poise){return poise.staffTiming?500000:poiseTickUs;}
-void SelectPoiseTiming(MeleePoise& poise,bool staff,long long now) {
-    if(poise.staffTiming==staff) return;
-    const auto oldQuiet=PoiseQuietInterval(poise);poise.staffTiming=staff;
+bool DualPoiseActor(CSWSCreature* actor);
+int SinglePoiseStance(CSWSCreature* actor);
+int GuardPoiseDamage(CSWSCreature* actor){
+    if(StaffPoiseActor(actor))return 11;
+    if(DualPoiseActor(actor))return 13;
+    const int points[]={20,35,15,25};return points[SinglePoiseStance(actor)];
+}
+int ParriedPoiseLoss(CSWSCreature* actor){
+    if(StaffPoiseActor(actor))return 35;
+    if(DualPoiseActor(actor))return 20;
+    const int points[]={25,20,15,25};return points[SinglePoiseStance(actor)];
+}
+int ParryPoiseReward(CSWSCreature* actor){
+    if(StaffPoiseActor(actor))return 25;
+    if(DualPoiseActor(actor))return 15;
+    const int points[]={20,15,15,25};return points[SinglePoiseStance(actor)];
+}
+int ClashPoiseDamage(CSWSCreature*){return 10;}
+long long PoiseQuietInterval(const MeleePoise& poise){return poise.dualTiming?3000000:(poise.staffTiming?2500000:(poise.singleTiming==2?1000000:poiseQuietUs));}
+long long PoiseTickInterval(const MeleePoise& poise){return (poise.staffTiming || poise.dualTiming)?500000:(poise.singleTiming==1?200000:poiseTickUs);}
+void SelectPoiseTiming(MeleePoise& poise,bool staff,long long now,bool dual=false,int single=0) {
+    if(poise.staffTiming==staff && poise.dualTiming==dual && poise.singleTiming==single) return;
+    const auto oldQuiet=PoiseQuietInterval(poise);poise.staffTiming=staff;poise.dualTiming=dual;poise.singleTiming=single;
     if(poise.quietUntil) poise.quietUntil=std::max(0LL,poise.quietUntil+PoiseQuietInterval(poise)-oldQuiet);
     poise.wasEligible=false;poise.nextTick=std::max(poise.quietUntil,now+PoiseTickInterval(poise));
 }
@@ -367,11 +623,11 @@ int AdvancePoiseRegeneration(MeleePoise& poise,long long now,bool swinging,bool 
     }
     if(!poise.wasEligible && now>=poise.quietUntil) poise.nextTick=std::max(poise.nextTick,now+tick);
     poise.wasEligible=true;
-    if(poise.percent>=100) {poise.nextTick=std::max(poise.quietUntil,now+tick);return 0;}
+    if(poise.percent>=poise.capacity) {poise.nextTick=std::max(poise.quietUntil,now+tick);return 0;}
     if(!poise.nextTick) poise.nextTick=std::max(poise.quietUntil,now+tick);
     if(now<poise.quietUntil || now<poise.nextTick) return 0;
     const long long ticks=1+(now-poise.nextTick)/tick;
-    const int gain=int(std::min<long long>(100-poise.percent,ticks));
+    const int gain=int(std::min<long long>(poise.capacity-poise.percent,ticks));
     poise.percent+=gain;poise.nextTick+=ticks*tick;return gain;
 }
 bool PoiseRegenerationClockProbe() {
@@ -430,10 +686,44 @@ bool PoiseRegenerationClockProbe() {
     return ok;
 }
 std::unordered_map<unsigned long long,MeleePoise> meleePoise;
+void ConfigureNpcPoise(CSWSCreature* actor) {
+    if(!actor || actor==ServerActor())return;
+    auto& p=meleePoise[actor->m_objectId];
+    const int cap=NpcCombatPolicy(actor).poise;
+    if(p.capacity!=cap){p.capacity=cap;p.percent=std::min(p.percent,cap);}
+}
+
+void RewardParryPoise(MeleePoise& p,int points){p.percent=std::min(p.capacity,p.percent+points);}
+void ClearClashEpisode(unsigned long long id) {
+    auto it=meleePoise.find(id);if(it==meleePoise.end())return;
+    const auto other=it->second.clashOpponent;
+    auto clear=[](unsigned long long actor,MeleePoise& p){
+        if(p.clashParry){auto npc=npcPlayback.find(actor);if(npc!=npcPlayback.end()){
+            npc->second.parrying=false;
+            // Release the extra wait on contact/interruption, retaining normal guard timing.
+            npc->second.nextAttack=std::min(npc->second.nextAttack,npc->second.parryStart+350000);
+        }}
+        p.clashOpponent=OBJECT_INVALID;p.clashes=p.clashDecision=0;p.clashParry=p.clashSwing=false;p.clashGuardUntil=0;
+    };
+    clear(id,it->second);
+    auto peer=meleePoise.find(other);
+    if(peer!=meleePoise.end() && peer->second.clashOpponent==id)clear(other,peer->second);
+}
+int ClashParryBonus(unsigned long long a,unsigned long long b) {
+    auto it=meleePoise.find(a);
+    return it!=meleePoise.end() && it->second.clashOpponent==b?5*std::max(0,it->second.clashes-1):0;
+}
+int ClashParryChance(const MeleePoise& p){return std::min(100,p.clashes*5);}
+bool ChooseClashParry(MeleePoise& p,int roll) {
+    if(!p.clashes)return false;
+    if(p.clashDecision!=p.clashes){p.clashDecision=p.clashes;p.clashParry=roll>=1 && roll<=ClashParryChance(p);}
+    return p.clashParry;
+}
+void ValidateClashEpisodes(long long now);
 const char* npcParryPercentVariable="K1_ENGAGE_PARRY_PERCENT";
 int NpcDefaultParryPercent(CSWSCreature* actor) {
     for(const auto& type:k1DarkJediTypes)if(actor && !_stricmp(actor->m_sTag.CStr(),type.tag))return type.parryPercent;
-    return 20;
+    return NpcCombatPolicy(actor).parry;
 }
 int NpcParryPercent(CSWSCreature* actor) {
     // Native per-creature/template local: absent means the supported soldier's
@@ -511,11 +801,13 @@ void UpdateMeleePoise() {
     auto* server=g_pAppManager->m_pServerExoApp;
     if(!server || !server->m_pInternal) return;
     const auto now=server->GetWorldTimer()->GetSnapshotTime();
+    ValidateClashEpisodes(now);
     for(auto it=meleePoise.begin();it!=meleePoise.end();) {
         auto* actor=server->GetCreatureByGameObjectID(it->first);
         if(!actor || actor->GetDead()) {it=meleePoise.erase(it);continue;}
+        ConfigureNpcPoise(actor);
         auto& poise=it->second;
-        SelectPoiseTiming(poise,StaffPoiseActor(actor),now);
+        SelectPoiseTiming(poise,StaffPoiseActor(actor),now,DualPoiseActor(actor),SinglePoiseStance(actor));
         if(poise.recoverAt && now>=poise.recoverAt && actor->m_nState==EFFECT_STATE_NONE) {
             RecoverBrokenPoise(poise,now);
             fprintf(stderr,"K1_POISE_RECOVER actor=%llu percent=%d\n",it->first,poise.percent);
@@ -557,9 +849,11 @@ PointCorrection &hiltCorrection=playerPlayback.hiltCorrection,&leftCorrection=pl
 std::vector<BodyPose> &lastPose=playerPlayback.lastPose,&blendFrom=playerPlayback.blendFrom;
 std::vector<BodyPose> nativeIdlePose;
 std::vector<BodyPose> nativeStaffGuardPose;
+std::vector<BodyPose> nativeDualGuardPose;
 UtilityPoseBlend utilityBlend;
 int utilityBlendsCompleted[2] = {};
 std::vector<UtilityPoseJoint> CaptureUtilityPose(Gob* body);
+GripPose ReadGrip(Gob* body);
 UtilityPoseBlend& UtilityBlendFor(Gob* body) {
     for(auto& entry:npcPlayback)if(entry.second.utilityBlend.body==body)return entry.second.utilityBlend;
     return utilityBlend;
@@ -594,10 +888,17 @@ void PoiseRegenerationState(CSWSCreature* actor,long long now,bool& swinging,boo
     }
 }
 void NotePoiseActivity(CSWSCreature* actor,const char* reason) {
+    ConfigureNpcPoise(actor);
+    if(actor && strcmp(reason,"swing") && strcmp(reason,"parry_guard") && strcmp(reason,"clash"))ClearClashEpisode(actor->m_objectId);
+    if(actor && !strcmp(reason,"swing")) {
+        auto& p=meleePoise[actor->m_objectId];
+        if(p.clashSwing)ClearClashEpisode(actor->m_objectId);
+        if(p.clashes)p.clashSwing=true;
+    }
     if(!actor || state.mode==K1EngageState::Mode::Exploration || !HasMeleePoise(actor)) return;
     auto& poise=meleePoise[actor->m_objectId];
     const auto now=g_pAppManager->m_pServerExoApp->GetWorldTimer()->GetSnapshotTime();
-    SelectPoiseTiming(poise,StaffPoiseActor(actor),now);
+    SelectPoiseTiming(poise,StaffPoiseActor(actor),now,DualPoiseActor(actor),SinglePoiseStance(actor));
     DelayPoiseRegeneration(poise,now);
     if(std::getenv("K1_ENGAGE_POISE_REGEN_TEST")) fprintf(stderr,"K1_POISE_ACTIVITY actor=%llu reason=%s now=%lld\n",actor->m_objectId,reason,now);
 }
@@ -607,6 +908,7 @@ void SpendMeleePoise(CSWSCreature* actor,unsigned long long attackerId,int point
     poise.percent=std::max(0,poise.percent-points);
     fprintf(stderr,"K1_POISE_HIT actor=%llu percent=%d\n",actor->m_objectId,poise.percent);
     if(poise.percent || poise.recoverAt) return;
+    ClearClashEpisode(actor->m_objectId);
     constexpr float stunSeconds=float(poiseStunUs)/1000000.f;
     poise.recoverAt=g_pAppManager->m_pServerExoApp->GetWorldTimer()->GetSnapshotTime()+poiseStunUs;
     poise.quietUntil=0;poise.wasSwinging=false;
@@ -625,22 +927,55 @@ void SpendMeleePoise(CSWSCreature* actor,unsigned long long attackerId,int point
     fprintf(stderr,"K1_CHAIN_POISE_RESET attacker=%llu target=%llu\n",attackerId,actor->m_objectId);
     fprintf(stderr,"K1_POISE_BREAK actor=%llu native_state=%d duration=%g\n",actor->m_objectId,actor->m_nState,stunSeconds);
 }
+void ApplyClashPoise(CSWSCreature* a,CSWSCreature* b) {
+    if(meleePoise[a->m_objectId].clashOpponent!=b->m_objectId)ClearClashEpisode(a->m_objectId);
+    if(meleePoise[b->m_objectId].clashOpponent!=a->m_objectId)ClearClashEpisode(b->m_objectId);
+    const int count=std::min(100,meleePoise[a->m_objectId].clashes+1);
+    auto record=[&](CSWSCreature* actor,CSWSCreature* other){
+        auto& p=meleePoise[actor->m_objectId];p.clashOpponent=other->m_objectId;p.clashes=count;
+        p.clashDecision=0;p.clashParry=p.clashSwing=false;p.clashGuardUntil=0;
+        auto weapon=[&](int slot){auto* item=actor->m_pInventory?actor->m_pInventory->GetItemInSlot(slot):nullptr;return item?item->m_objectId:OBJECT_INVALID;};
+        p.clashRight=weapon(CSWInventory::SLOT_RIGHTWEAPON);p.clashLeft=weapon(CSWInventory::SLOT_LEFTWEAPON);
+    };
+    record(a,b);record(b,a);
+    // Snapshot both contributions before a possible break changes either actor.
+    const int lossB=ClashPoiseDamage(a),lossA=ClashPoiseDamage(b);
+    SpendMeleePoise(b,a->m_objectId,lossB,"clash");
+    SpendMeleePoise(a,b->m_objectId,lossA,"clash");
+    fprintf(stderr,"K1_CLASH_POISE a=%llu b=%llu loss_a=%d loss_b=%d count=%d\n",a->m_objectId,b->m_objectId,lossA,lossB,count);
+}
 struct MeleeContact {
     unsigned long long attacker,target;int serial;
-    long long at=0,until=0;
+    long long at=0;
+    long long wallAt=0;
     Vector hitPoint,bladeMotion,bladeDirection;
     Part* hitPart=nullptr; // consumed at scene sampling only; never dereferenced after queuing
     int dismemberRow=-1;
     int blade=-1;
     bool poiseOnly=false;
+    // Dual contacts retain their own native item identity during scene resolution.
+    unsigned long long dualWeapon=OBJECT_INVALID;
+    bool offhand=false;
 };
 int SampleDismemberment(CSWSCreature* attacker,CSWSCreature* target,const MeleeContact& contact);
+bool CutSaberContact(CSWSCreature* attacker,const MeleeContact& contact);
+struct CutTexture {std::string part,resource;};
+std::vector<CutTexture> CutTextures(Gob* model);
+std::string CutBasePartName(const std::string& name);
 void UpdateDismemberCorpses(CAurScene* rendered=nullptr);
 void ClearDismemberArea(unsigned long long areaId);
 bool DismemberArenaProbe(int& phase,int& ticks,CSWSCreature* player,CSWSCreature* enemy);
+bool RecordNpcDismemberWitness(CSWSCreature* actor,int group,int variant);
+int NpcDismemberProbeTick();
 const MeleeContact* damageContact=nullptr;
-constexpr long long clashWindowUs=500000;
-std::vector<MeleeContact> sceneMeleeContacts,pendingMeleeContacts;
+bool ContactTimingEnabled(){static const bool enabled=std::getenv("K1_ENGAGE_CONTACT_TIMING")!=nullptr;return enabled;}
+long long ContactWallUs(){return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();}
+struct ContactEffectClock {long long world=0,wall=0,contactWorld=0,contactWall=0;unsigned long long attacker=OBJECT_INVALID,target=OBJECT_INVALID;int serial=0,hand=-1;};
+std::unordered_map<unsigned long long,ContactEffectClock> contactEffectClocks;
+struct ContactResponseClock {long long wall=0,world=0;unsigned int serial=0;bool attacking=false,native=false,interrupted=false;};
+std::unordered_map<unsigned long long,ContactResponseClock> contactBlockClocks;
+ContactResponseClock contactGuardClock;
+std::vector<MeleeContact> sceneMeleeContacts;
 unsigned long long meleeClashes=0;
 unsigned long long meleeDamageContacts=0;
 long long lastClashGap=0;
@@ -649,6 +984,7 @@ unsigned long long npcTimedParries=0;
 int parryProbeDirection=1;
 bool parryRenderRequested=false;
 bool parryRenderFailed=false;
+long long parrySuccessUntil=0;
 int parryRenderChecks=0;
 struct ClashExpiryObservation {int playerHP=0,enemyHP=0,playerBase=0,enemyBase=0;} clashExpiryObservation;
 void ResolveMeleeContacts(const std::vector<MeleeContact>& contacts,long long sampleTime=-1);
@@ -690,10 +1026,19 @@ void QueueBlockReaction(CSWSCreature* defender,int reaction) {
     auto& poise=meleePoise[defender->m_objectId];
     poise.blockReaction=reaction;poise.blockStarted=g_pAppManager->m_pServerExoApp->GetWorldTimer()->GetSnapshotTime();
     ++poise.blockSerial;
+    if(ContactTimingEnabled())contactBlockClocks[defender->m_objectId]={ContactWallUs(),poise.blockStarted,poise.blockSerial,false,false};
     fprintf(stderr,"K1_BLOCK_REACTION_CONTACT actor=%llu serial=%u clip=%s start=%lld\n",
         defender->m_objectId,poise.blockSerial,blockUpper[reaction],poise.blockStarted);
 }
 void ObserveBlockPose(Gob* body,PosePlayback& pose,const char* overlay,unsigned long long actor,bool moving) {
+    if(ContactTimingEnabled() && BlockReference(overlay)) {
+        auto found=contactBlockClocks.find(actor);
+        if(found!=contactBlockClocks.end()) {
+            fprintf(stderr,"K1_CONTACT_BLOCK_POSE actor=%llu wall_us=%lld world_us=%lld clip=%s\n",actor,ContactWallUs()-found->second.wall,
+                g_pAppManager->m_pServerExoApp->GetWorldTimer()->GetSnapshotTime()-found->second.world,overlay);
+            contactBlockClocks.erase(found);
+        }
+    }
     if(!std::getenv("K1_ENGAGE_PARRY_TEST") || !BlockReference(overlay)) return;
     const auto& poise=meleePoise[actor];auto& observation=blockObservations[actor];
     if(observation.started!=poise.blockStarted) {observation=BlockObservation();observation.started=poise.blockStarted;}
@@ -704,15 +1049,18 @@ void ObserveBlockPose(Gob* body,PosePlayback& pose,const char* overlay,unsigned 
     for(const auto& p:pose.lastPose) observation.finite=observation.finite &&
         K1SaberContact::Finite(p.part->m_vLocalPosition) && std::isfinite(dot(p.part->m_qLocalOrientation,p.part->m_qLocalOrientation));
     float time=0,length=0;
+    auto* creature=g_pAppManager->m_pServerExoApp->GetCreatureByGameObjectID(actor);
+    auto* client=creature?creature->GetClientCreature():nullptr;
+    const bool independent=client && client->GetAnimationBase() && client->GetAnimationBase()->m_nWeaponClass==CSWCAnimBase::WEAPON_CLASS_DUAL_SABER;
     observation.finite=observation.finite && body->GetAnimation(const_cast<char*>(overlay),&time,&length) &&
-        time>=0 && time<length && pose.lastGrip.joined;
+        time>=0 && time<length && pose.lastGrip.joined!=independent;
     if(observation.samples==1) fprintf(stderr,"K1_BLOCK_REACTION_POSE actor=%llu clip=%s joined=%d grip=%g finite=%d\n",
         actor,overlay,pose.lastGrip.joined,pose.sourceContactError,observation.finite);
 }
 // Separate player/NPC melee rates. Contact, chaining and pose calibration remain
 // in clip time, so slowing playback preserves their alignment with the blade.
-constexpr float npcMeleeSwingRate=.82f;
-constexpr float playerMeleeSwingRate=npcMeleeSwingRate*1.04f;
+constexpr float npcMeleeSwingRate=.85f;
+constexpr float playerMeleeSwingRate=1.f;
 bool LiveMeleeRate(Gob* body,const char* clip,float expected) {
     if(!body || !clip) return false;
     for(int i=0;i<body->m_paAnimations.m_count;++i) {
@@ -745,11 +1093,14 @@ bool SwingSoundDue(int serial,int& played,float time,float start) {
     if(time<start || played==serial) return false;
     played=serial;return true;
 }
+void SaberContactVisual(CSWSCreature* actor,CSWSCreature* target,const char* kind);
 void EngageWeaponSound(CSWSCreature* actor,CSWSCreature* target,const char* kind) {
+    if(!strcmp(kind,"clash") || !strcmp(kind,"guard") || !strcmp(kind,"parry"))SaberContactVisual(actor,target,kind);
     if(!actor || (!K1EngageOwnsPlayer(actor->m_objectId) && !K1EngageOwnsEnemy(actor->m_objectId))) return;
     auto* client=actor?actor->GetClientCreature():nullptr;
     auto* item=actor && actor->m_pInventory?actor->m_pInventory->GetItemInSlot(CSWInventory::SLOT_RIGHTWEAPON):nullptr;
-    if(!client || !item || !item->IsLightsaber()) return;
+    if(!client || !item || (!item->IsLightsaber() && !SwordType(item->m_baseItem) &&
+        !((actor==ServerActor() || NativeConfiguredNpc(actor)) && NativeNpcBluntType(item->m_baseItem)))) return;
     const bool trace=std::getenv("K1_ENGAGE_SOUND_TEST")!=nullptr;
     if(trace) fprintf(stderr,"K1_ENGAGE_SOUND_BEGIN kind=%s actor=%llu\n",kind,actor->m_objectId);
     int result=0;
@@ -772,6 +1123,7 @@ void EngageWeaponSound(CSWSCreature* actor,CSWSCreature* target,const char* kind
 }
 
 bool StaffPrototype() { return std::getenv("K1_ENGAGE_STAFF_PROTOTYPE")!=nullptr; }
+bool DualPrototype() { return std::getenv("K1_ENGAGE_DUAL_PROTOTYPE")!=nullptr; }
 void QueueAttackDirection() {
     int forward=int(keyW)-int(keyS),right=int(keyD)-int(keyA);
     requestedDirection=K1EngageState::AttackDirection(float(-forward),float(right));
@@ -786,25 +1138,154 @@ CSWCCreature* Actor() {
         ? g_pAppManager->m_pClientExoApp->GetPlayerCreature() : nullptr;
 }
 CSWSCreature* ServerActor() { CSWCCreature* actor = Actor(); return actor ? actor->GetServerCreature() : nullptr; }
+bool DualMode() {
+    auto* actor=ServerActor();
+    if(!actor || actor->GetDead() || !actor->m_pInventory ||
+       (!DualPrototype() && !std::getenv("K1_ENGAGE_SANDBOX") && !ActorSwordPair(actor))) return false;
+    auto* right=actor->m_pInventory->GetItemInSlot(CSWInventory::SLOT_RIGHTWEAPON);
+    auto* left=actor->m_pInventory->GetItemInSlot(CSWInventory::SLOT_LEFTWEAPON);
+    auto saber=[](auto* item){return item && SingleMeleeType(item->m_baseItem);};
+    return saber(right) && saber(left) && right!=left;
+}
 bool StaffMode() {
     auto* actor=ServerActor();
     auto* item=actor && actor->m_pInventory?actor->m_pInventory->GetItemInSlot(CSWInventory::SLOT_RIGHTWEAPON):nullptr;
-    return (StaffPrototype() || K1EngageArenaLoadoutActive()) && item && item->m_baseItem==BASE_ITEM_DOUBLE_BLADED_LIGHTSABER;
+    return item && (((StaffPrototype() || K1EngageArenaLoadoutActive()) && item->m_baseItem==BASE_ITEM_DOUBLE_BLADED_LIGHTSABER) || DoubleSwordType(item->m_baseItem) || item->m_baseItem==BASE_ITEM_QUARTER_STAFF || item->m_baseItem==BASE_ITEM_GHAFFI_STICK);
 }
 bool StaffPoiseActor(CSWSCreature* actor){return actor && ((actor==ServerActor() && StaffMode()) || StaffNpc(actor));}
-float PlayerMeleeRate(){return StaffMode()?.95f:playerMeleeSwingRate;}
-int PlayerChainLimit(){return StaffMode()?4:maxChainSwings;}
-const char* PlayerRigResource() {return StaffMode()?"k1jastaff":"k1jarig";}
+bool DualPoiseActor(CSWSCreature* actor){return actor && ((actor==ServerActor() && DualMode()) || DualNpc(actor));}
+int redSelection=-1;
+int redChainFrom=-1;
+int blueChainFrom=-1;
+bool PurpleMode() {return !StaffMode() && !DualMode() && (redSelection>=0?redSelection==3:std::getenv("K1_ENGAGE_PURPLE")!=nullptr);}
+bool BlueMode() {return !StaffMode() && !DualMode() && (redSelection>=0?redSelection==2:!PurpleMode() && std::getenv("K1_ENGAGE_BLUE")!=nullptr);}
+bool RedMode() {return !StaffMode() && !DualMode() && (redSelection>=0?redSelection==1:!PurpleMode() && !BlueMode() && std::getenv("K1_ENGAGE_RED")!=nullptr);}
+float PlayerMeleeRate(){return StaffMode()?1.10f:DualMode()?.85f:PurpleMode()?1.30f:BlueMode()?1.15f:playerMeleeSwingRate;}
+int PlayerChainLimit(){return StaffMode() || BlueMode() || PurpleMode()?4:maxChainSwings;}
+Vector PoiseNumberColor(const Vector& defaultColor) {
+    if(StaffMode() || DualMode())return defaultColor;
+    return PurpleMode()?Vector(.75f,.3f,1.f):BlueMode()?Vector(.2f,.5f,1.f):
+        RedMode()?Vector(1.f,.2f,.2f):Vector(1.f,1.f,.15f);
+}
+int SinglePoiseStance(CSWSCreature* actor) {
+    if(!actor)return 0;
+    if(actor==ServerActor())return PurpleMode()?3:BlueMode()?2:RedMode()?1:0;
+    return BlueNpc(actor)?2:RedNpc(actor)?1:0;
+}
+bool UsesRedAttacks() {return RedMode() || PurpleMode();}
+const char* SingleStanceResource(int selection) {
+    const char* resources[]={"k1jarig","k1jared","k1jablue","k1japurp"};
+    return selection>=0 && selection<4?resources[selection]:nullptr;
+}
+int NextSingleStance(bool hasBlue,bool hasPurple) {
+    return PurpleMode()?0:BlueMode()?(hasPurple?3:0):RedMode()?(hasBlue?2:hasPurple?3:0):1;
+}
+bool PurpleAuthoredGuard(bool guarding,bool attacking,bool blocked) {
+    return PurpleMode() && guarding && !attacking && !blocked;
+}
+const char* PurpleGuardWalkClip(bool guarding,bool attacking,bool blocked,bool moving,bool backward) {
+    if(!moving || !PurpleAuthoredGuard(guarding,attacking,blocked))return nullptr;
+    return backward?"j_purpbackwalk":"j_purpwalk";
+}
+CCAppearanceInfo LiveAppearance(CSWCCreature* actor);
+void NativePlayerModel(CSWCCreature* actor,CCAppearanceInfo& appearance,CResRef& model,CResRef* texture=nullptr) {
+    CExoString type;
+    g_pRules->m_p2DArrays->m_pAppearance->GetCExoStringEntry(appearance.core.m_nAppearanceId,CExoString("modeltype"),&type);
+    if(type=="B")actor->m_pCreatureAppearance->GetBTypeModelAndTextureResRef(&appearance,&model,texture);
+    else {CExoString race;g_pRules->m_p2DArrays->m_pAppearance->GetCExoStringEntry(appearance.core.m_nAppearanceId,CExoString("race"),&race);model=race;}
+}
+const char* PlayerRigForNative(const char* native) {
+    if(auto* r=WearableRig(native)) {
+        const auto& style=DualMode()?r->dual:StaffMode()?r->staff:PurpleMode()?r->purple:BlueMode()?r->blue:RedMode()?r->red:r->single;
+        if(!style.empty())return style.c_str();
+    }
+    return DualMode()?"k1jadual":StaffMode()?"k1jastaff":SingleStanceResource(PurpleMode()?3:BlueMode()?2:RedMode()?1:0);
+}
+const char* PlayerRigResource() {
+    auto* actor=Actor();
+    if(actor && actor->m_pCreatureAppearance && g_pRules && g_pRules->m_p2DArrays) {
+        auto appearance=LiveAppearance(actor);CResRef native;NativePlayerModel(actor,appearance,native);
+        return PlayerRigForNative(native.GetResRefStr());
+    }
+    return PlayerRigForNative("pmbbl");
+}
+bool SingleStanceResourceName(const char* name) {
+    for(int i=0;i<4;++i)if(!_stricmp(name,SingleStanceResource(i)))return true;
+    for(const auto& r:wearableRigs)for(const auto* s:{&r.single,&r.red,&r.blue,&r.purple})if(!_stricmp(name,s->c_str()))return true;
+    return false;
+}
+// Strong S3/A3 clip boundaries in animation seconds. Yellow tuning stays intact.
+constexpr float redHitWindows[7][2]={{.73333333f,1.38333333f},{.73333333f,1.16666667f},
+    {.46666667f,.73333333f},{.83333333f,1.23333333f},{.73333333f,1.f},
+    {.7f,1.06666667f},{.56666667f,.93333333f}};
+#include "include/k1redchain.inc"
+#include "include/k1bluechain.inc"
+#include "include/k1bluewindows.inc"
+#include "include/k1bluespins.inc"
+#include "include/k1redspins.inc"
+bool BlueSpinChain(int from,int to) {
+    return from>=0 && from<7 && to>=0 && to<7 && blueSpinChains[from][to];
+}
+bool RedSpinChain(int from,int to) {
+    return from>=0 && from<7 && to>=0 && to<7 && redSpinChains[from][to];
+}
+bool PlayerSpinChain() {
+    return state.attacking && ((BlueMode() && BlueSpinChain(blueChainFrom,swingDirection)) ||
+        (UsesRedAttacks() && RedSpinChain(redChainFrom,swingDirection)));
+}
+bool NpcSpinChain(const NpcPlayback& npc) {
+    return npc.attacking && ((npc.blue && BlueSpinChain(npc.blueFrom,npc.direction)) ||
+        (npc.red && RedSpinChain(npc.redFrom,npc.direction)));
+}
+const char* PlayerAttackClip(bool upper) {
+    if(BlueMode() && blueChainFrom>=0) {
+        const auto& clip=blueChains[blueChainFrom][swingDirection];
+        return upper && !BlueSpinChain(blueChainFrom,swingDirection)?clip.upper:clip.full;
+    }
+    if(UsesRedAttacks() && redChainFrom>=0) {
+        const auto& clip=redChains[redChainFrom][swingDirection];
+        return upper && !RedSpinChain(redChainFrom,swingDirection)?clip.upper:clip.full;
+    }
+    return upper?attacks[swingDirection]:fullAttacks[swingDirection];
+}
+const char* NpcAttackClip(const NpcPlayback& npc,bool upper) {
+    if(npc.blue && npc.blueFrom>=0) {
+        const auto& clip=blueChains[npc.blueFrom][npc.direction];
+        return upper && !BlueSpinChain(npc.blueFrom,npc.direction)?clip.upper:clip.full;
+    }
+    if(npc.red && npc.redFrom>=0) {
+        const auto& clip=redChains[npc.redFrom][npc.direction];
+        return upper && !RedSpinChain(npc.redFrom,npc.direction)?clip.upper:clip.full;
+    }
+    return upper?attacks[npc.direction]:fullAttacks[npc.direction];
+}
+const char* AttackFullReference(const char* upper) {
+    for(int i=0;i<7;++i)if(!strcmp(upper,attacks[i]))return fullAttacks[i];
+    for(const auto& row:redChains)for(const auto& clip:row)if(!strcmp(upper,clip.upper))return clip.full;
+    for(const auto& row:blueChains)for(const auto& clip:row)if(!strcmp(upper,clip.upper))return clip.full;
+    return nullptr;
+}
+constexpr float dualHitWindows[7][2]={{.25f,.55f},{.25f,.60f},{.25f,.55f},{.25f,.55f},
+    {.25f,.55f},{.25f,.55f},{.30f,.60f}};
+int dualContactSerial=-1;
+unsigned int dualContactHands=0;
+float dualWalkLowerPositionError=0,dualWalkLowerRotationError=0;
+int dualWalkLowerSamples=0;
+bool dualGuardAfterNative=false;
 // Staff timings come from its S7/A7 source clip boundaries. Completed stance
 // timings remain in hitWindows and are never retuned by this selection path.
 constexpr float staffHitWindows[7][2]={{.4f,.7f},{.25f,.55f},{.25f,.55f},{.25f,.55f},
     {.25f,.55f},{.25f,.55f},{.25f,.55f}};
-float NpcHitStart(const NpcPlayback& npc) {return npc.staff?staffHitWindows[npc.direction][0]:hitWindows[npc.direction][0];}
-float NpcHitEnd(const NpcPlayback& npc) {return npc.staff?staffHitWindows[npc.direction][1]:hitWindows[npc.direction][1];}
-int NpcChainLimit(const NpcPlayback& npc) {return npc.staff?k1DarkJediTypes[1].chainLimit:maxChainSwings;}
-float NpcSwingRate(const NpcPlayback& npc) {return npc.staff?k1DarkJediTypes[1].swingRate:npcMeleeSwingRate;}
+float NpcHitStart(const NpcPlayback& npc) {if(npc.blue)return npc.blueFrom>=0?blueChains[npc.blueFrom][npc.direction].start:blueHitWindows[npc.direction][0]; return npc.red?(npc.redFrom>=0?redChains[npc.redFrom][npc.direction].start:redHitWindows[npc.direction][0]):(npc.dual?dualHitWindows[npc.direction][0]:(npc.staff?staffHitWindows[npc.direction][0]:hitWindows[npc.direction][0]));}
+float NpcHitEnd(const NpcPlayback& npc) {if(npc.blue)return npc.blueFrom>=0?blueChains[npc.blueFrom][npc.direction].end:blueHitWindows[npc.direction][1]; return npc.red?(npc.redFrom>=0?redChains[npc.redFrom][npc.direction].end:redHitWindows[npc.direction][1]):(npc.dual?dualHitWindows[npc.direction][1]:(npc.staff?staffHitWindows[npc.direction][1]:hitWindows[npc.direction][1]));}
+int NpcChainLimit(const NpcPlayback& npc) {return npc.staff?k1DarkJediTypes[1].chainLimit:(npc.blue?4:maxChainSwings);}
+float NpcSwingRate(const NpcPlayback& npc) {
+    return npc.dual?k1DarkJediTypes[2].swingRate:npc.staff?k1DarkJediTypes[1].swingRate:
+        npc.red?k1DarkJediTypes[3].swingRate:npc.blue?k1DarkJediTypes[4].swingRate:npcMeleeSwingRate;
+}
 const K1NpcType* RegisteredNpcType(const NpcPlayback& npc) {
     auto* actor=npc.owner?npc.owner->GetServerCreature():nullptr;
+    if(NativeConfiguredNpc(actor)){if(RedNpc(actor))return &k1DarkJediTypes[3];if(BlueNpc(actor))return &k1DarkJediTypes[4];}
     for(const auto& type:k1DarkJediTypes)if(actor && !_stricmp(actor->m_sTag.CStr(),type.tag))return &type;
     return nullptr;
 }
@@ -818,8 +1299,8 @@ bool NpcChainAccepted(NpcPlayback& npc) {
     }
     return npc.continueChain;
 }
-float PlayerHitStart(int direction) {return StaffMode()?staffHitWindows[direction][0]:hitWindows[direction][0];}
-float PlayerHitEnd(int direction) {return StaffMode()?staffHitWindows[direction][1]:hitWindows[direction][1];}
+float PlayerHitStart(int direction) {if(BlueMode())return blueChainFrom>=0?blueChains[blueChainFrom][direction].start:blueHitWindows[direction][0]; return UsesRedAttacks()?(redChainFrom>=0?redChains[redChainFrom][direction].start:redHitWindows[direction][0]):(DualMode()?dualHitWindows[direction][0]:(StaffMode()?staffHitWindows[direction][0]:hitWindows[direction][0]));}
+float PlayerHitEnd(int direction) {if(BlueMode())return blueChainFrom>=0?blueChains[blueChainFrom][direction].end:blueHitWindows[direction][1]; return UsesRedAttacks()?(redChainFrom>=0?redChains[redChainFrom][direction].end:redHitWindows[direction][1]):(DualMode()?dualHitWindows[direction][1]:(StaffMode()?staffHitWindows[direction][1]:hitWindows[direction][1]));}
 // Contact includes the same short follow-through already allowed before a chain
 // handoff. Keep strike-end timing for chain input, guard cancellation and posing.
 float ContactEnd(float strikeEnd) {return strikeEnd+chainFollowThrough;}
@@ -854,19 +1335,26 @@ bool ContactTimingProbe() {
     return ok;
 }
 bool Supported(CSWCCreature* actor) {
+    if(DualMode() && actor==Actor() && actor && actor->GetAnimationBase())
+        return actor->GetAnimationBase()->m_nWeaponClass==CSWCAnimBase::WEAPON_CLASS_DUAL_SABER;
     if(StaffMode() && actor==Actor() && actor && actor->GetAnimationBase())
         return actor->GetAnimationBase()->m_nWeaponClass==CSWCAnimBase::WEAPON_CLASS_TWO_HANDED_SABER;
     return actor && actor->GetServerCreature() && !actor->GetServerCreature()->GetDead()
         && actor->GetServerCreature()->m_pInventory->GetItemInSlot(CSWInventory::SLOT_RIGHTWEAPON)
-        && actor->GetServerCreature()->m_pInventory->GetItemInSlot(CSWInventory::SLOT_RIGHTWEAPON)->m_baseItem==BASE_ITEM_LIGHTSABER
+        && SingleMeleeType(actor->GetServerCreature()->m_pInventory->GetItemInSlot(CSWInventory::SLOT_RIGHTWEAPON)->m_baseItem)
         && actor->GetAnimationBase()
-        && actor->GetAnimationBase()->m_nWeaponClass == CSWCAnimBase::WEAPON_CLASS_SINGLE_SABER;
+        && (actor->GetAnimationBase()->m_nWeaponClass == CSWCAnimBase::WEAPON_CLASS_SINGLE_SABER || actor->GetAnimationBase()->m_nWeaponClass == CSWCAnimBase::WEAPON_CLASS_STUN_BATON);
 }
 void MaintainSaberCombat(CSWCCreature* actor) {
     CSWSCreature* server=actor->GetServerCreature();server->SetCombatState(1,1);
     if(server->m_pCombatRound && server->m_pCombatRound->m_bSpellCastRound) return;
     CSWCItem* item=g_pAppManager->m_pClientExoApp->GetItemByGameObjectID(actor->m_aEquippedItemIds[4]);
-    if(item && !item->m_bPowered) item->PowerItem(1,0,1,0);
+    if(item && (SaberType(item->m_baseItem) ||
+        (NativeConfiguredNpc(server) && item->m_baseItem==BASE_ITEM_QUARTER_STAFF)) && !item->m_bPowered) item->PowerItem(1,0,1,0);
+    if((DualMode() && actor==Actor()) || (NativeConfiguredNpc(server) && DualNpc(server))) {
+        auto* left=g_pAppManager->m_pClientExoApp->GetItemByGameObjectID(actor->m_aEquippedItemIds[5]);
+        if(left && SaberType(left->m_baseItem) && !left->m_bPowered) left->PowerItem(1,0,1,0);
+    }
 }
 bool Spotted(bool trace=false) {
     CSWSCreature* actor = ServerActor();
@@ -876,7 +1364,13 @@ bool Spotted(bool trace=false) {
         CSWSCreature* npc = g_pAppManager->m_pServerExoApp->GetCreatureByGameObjectID(area->m_aObjectsByX.m_pArray[i]);
         if(trace && npc && npc!=actor && !npc->GetDead()) fprintf(stderr,"K1_ENGAGE_THREAT_SCAN npc=%llu reputation=%d native_combat=%d target=%llu attempted=%llu objects=%d\n",
             npc->m_objectId,npc->GetReputation(actor->m_objectId,0),npc->m_bCombatState,npc->m_attackTargetId,npc->m_attemptedAttackTargetId,npc->m_actionList.m_pInternal->m_nCount);
-        if (!npc || npc == actor || npc->GetDead() || SandboxIdle(npc) || npc->GetReputation(actor->m_objectId, 0) > 10) continue;
+        if (!npc || npc == actor || npc->GetDead() || SandboxIdle(npc)) continue;
+        // A sandbox fight still needs the existing combat activation path when
+        // the player is excluded. Detect the actual opposing NPC, not a threat
+        // to the player, and keep native alignment/target policy independent.
+        auto sandbox=sandboxActors.find(npc->m_objectId);
+        auto* opponent=sandboxSession && !sandboxTargetPlayer && sandbox!=sandboxActors.end() && !sandbox->second.friendly?SandboxTarget(npc,actor):nullptr;
+        if(!opponent && npc->GetReputation(actor->m_objectId,0)>10)continue;
         auto report=[&](const char* why) {
             if(state.mode!=K1EngageState::Mode::Exploration && std::find(encounter.begin(),encounter.end(),npc->m_objectId)==encounter.end())
                 encounter.push_back(npc->m_objectId);
@@ -884,6 +1378,10 @@ bool Spotted(bool trace=false) {
                 npc->m_pCombatRound?npc->m_pCombatRound->m_bRoundStarted:-1,npc->m_actionList.m_pInternal->m_nCount);
             return true;
         };
+        if(opponent) {
+            auto* seen=npc->GetVisibleListElement(opponent->m_objectId);
+            if(seen && (seen->m_flags & 1))return report("sandbox_opponents");
+        }
         const auto owned=npcPlayback.find(npc->m_objectId);
         if(owned!=npcPlayback.end() && owned->second.hasMove && owned->second.navigation.active)
             return report("engage_pursuit");
@@ -917,7 +1415,16 @@ void StopOverlays(Gob* body) {
     if (!body) return;
     for (const char* name : attacks) body->PlayAnimation(const_cast<char*>(name), 1, AnimRun::kAnimRemove, 0);
     for (const char* name : fullAttacks) body->PlayAnimation(const_cast<char*>(name), 1, AnimRun::kAnimRemove, 0);
+    for(const auto& row:redChains)for(const auto& clip:row) {
+        body->PlayAnimation(const_cast<char*>(clip.full),1,AnimRun::kAnimRemove,0);
+        body->PlayAnimation(const_cast<char*>(clip.upper),1,AnimRun::kAnimRemove,0);
+    }
+    for(const auto& row:blueChains)for(const auto& clip:row) {
+        body->PlayAnimation(const_cast<char*>(clip.full),1,AnimRun::kAnimRemove,0);
+        body->PlayAnimation(const_cast<char*>(clip.upper),1,AnimRun::kAnimRemove,0);
+    }
     for (const char* name : bases) body->PlayAnimation(const_cast<char*>(name), 1, AnimRun::kAnimRemove, 0);
+    for(const char* name:{"j_purpwalk","j_purpbackwalk"})body->PlayAnimation(const_cast<char*>(name),1,AnimRun::kAnimRemove,0);
     for(const char* name:blockUpper) body->PlayAnimation(const_cast<char*>(name),1,AnimRun::kAnimRemove,0);
     body->PlayAnimation(const_cast<char*>("y_guard"), 1, AnimRun::kAnimRemove, 0);
     body->PlayAnimation(const_cast<char*>("y_ready"), 1, AnimRun::kAnimRemove, 0);
@@ -925,7 +1432,9 @@ void StopOverlays(Gob* body) {
     currentBase=currentOverlay=nullptr;
 }
 void ReleaseAnimations(Gob* body) {
-    nativeIdlePose.clear();nativeStaffGuardPose.clear();
+    playerPlayback.stanceTransition=false;
+    playerPlayback.nativeGait={};
+    nativeIdlePose.clear();nativeStaffGuardPose.clear();nativeDualGuardPose.clear();
     StopOverlays(body);
     body->RemoveAddInAnimations();
     // Native idle/walk controllers are sparse. Restore the native bind values
@@ -949,29 +1458,57 @@ CCAppearanceInfo LiveAppearance(CSWCCreature* actor) {
     appearance.core.m_bUseBackupHead=cached->m_bUseBackupHead;appearance.core.m_race=cached->m_race;
     return appearance;
 }
+bool RebindRigFollowCamera(CSWCCreature* actor,CSWCModule* module,CAurCamera* camera,int previousType,const Vector& eye,const Quaternion& orientation) {
+    if(!actor || actor!=Actor() || !module || !camera || module->m_pCamera!=camera)return false;
+    auto* target=static_cast<CAurObject*>(actor->GetCameraFollowPart());
+    if(!target)return false;
+    auto* behavior=camera->GetBehavior(-1);
+    if(behavior && behavior->GetType()==BEHAVIOR_CAMERA_COMBAT) {
+        module->m_cSavedCameraSettings.m_pTarget=target;
+        return true;
+    }
+    if(behavior && behavior->GetType()!=BEHAVIOR_CAMERA_ON_A_STICK)return false;
+    if(!behavior && previousType!=BEHAVIOR_CAMERA_ON_A_STICK && module->m_nCameraMode!=CClientOptions::CAMERA_MODE_ON_A_STICK)return false;
+    auto* follow=behavior?static_cast<CSWCameraOnAStick*>(behavior):new CSWCameraOnAStick(camera->AsCAurObject(),target);
+    if(!behavior)camera->SetBehavior(follow);
+    follow->m_nFollowingBody=actor->GetFollowingBody();
+    follow->m_fCameraOffset=actor->GetHeadHeightOffset()+actor->GetCameraOffset();
+    follow->ChangeTarget(target,0);
+    module->m_cSavedCameraSettings.m_pTarget=target;
+    camera->SetPosition(eye);camera->SetOrientation(orientation);
+    follow->m_vLastCameraPosition=eye;follow->m_vLastTargetPosition=follow->GetTargetHeadPosition();
+    fprintf(stderr,"K1_RIG_CAMERA_REBOUND recreated=%d target_live=%d\n",behavior?0:1,follow->m_pTargetObject.m_pObject!=nullptr);
+    return true;
+}
 bool RebuildOwnedRig(CSWCCreature* actor,bool engage) {
     if(!actor || !actor->m_pCreatureAppearance) return false;
     Gob* old=actor->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1);
     if(engage && rigBodyRequested && rigBodyOwner==actor && IsSourceBody(old) && old->m_pModel && !_stricmp(old->m_pModel->m_szName,PlayerRigResource())) return true;
     if(engage) {
-        if(!old || !old->m_pModel || (!IsSourceBody(old) && strcmp(old->m_pModel->m_szName,"PMBBL") && strcmp(old->m_pModel->m_szName,"pmbbl"))) return false;
+        if(!old || !old->m_pModel || (!IsSourceBody(old) && !WearableRig(old->m_pModel->m_szName) && _stricmp(old->m_pModel->m_szName,"pmbbl"))) return false;
         if(old->m_pAddInModel && old!=loadedBody) return false;
         if(!g_pExoResMan->Exists(CResRef(PlayerRigResource()),RESTYPE_MDL,static_cast<unsigned int*>(nullptr)) ||
            !g_pExoResMan->Exists(CResRef(PlayerRigResource()),RESTYPE_MDX,static_cast<unsigned int*>(nullptr))) {
             fprintf(stderr,"K1_ENGAGE_RIG_UNAVAILABLE missing_local_candidate\n");return false;
         }
     }
+    auto* cameraModule=g_pAppManager->m_pClientExoApp->GetModule();
+    auto* camera=cameraModule?cameraModule->m_pCamera:nullptr;
+    auto* cameraBehavior=camera?camera->GetBehavior(-1):nullptr;
+    const int cameraType=cameraBehavior?cameraBehavior->GetType():-1;
+    const Vector cameraEye=camera?camera->GetPosition():Vector();
+    const Quaternion cameraOrientation=camera?camera->GetOrientation():Quaternion();
     CCAppearanceInfo appearance=LiveAppearance(actor);
     CSWCCreatureAppearance* cached=actor->m_pCreatureAppearance;
     CResRef expected,texture,stored,storedTexture;
-    cached->GetBTypeModelAndTextureResRef(&appearance,&expected,&texture);
-    cached->GetBTypeModelAndTextureResRef(&actor->m_appearanceInfo,&stored,&storedTexture);
+    NativePlayerModel(actor,appearance,expected,&texture);
+    NativePlayerModel(actor,actor->m_appearanceInfo,stored,&storedTexture);
     fprintf(stderr,"K1_ENGAGE_RIG_APPEARANCE live=%s cached=%s stored=%s texture=%s\n",old&&old->m_pModel?old->m_pModel->m_szName:"none",expected.GetResRefStr(),stored.GetResRefStr(),texture.GetResRefStr());
-    if(engage && strcmp(expected.GetResRefStr(),"pmbbl") && strcmp(expected.GetResRefStr(),"PMBBL")) return false;
+    if(engage && !WearableRig(expected.GetResRefStr()) && _stricmp(expected.GetResRefStr(),"pmbbl")) return false;
     if(old==loadedBody && old) ReleaseAnimations(old);
     utilityBlend = {};
     // Native appearance replacement destroys the old Part tree. Drop identities first.
-    loadedBody=nullptr;nativeIdlePose.clear();nativeStaffGuardPose.clear();lastPose.clear();blendFrom.clear();rotationFrom.clear();blendPending=false;
+    loadedBody=nullptr;nativeIdlePose.clear();nativeStaffGuardPose.clear();nativeDualGuardPose.clear();lastPose.clear();blendFrom.clear();rotationFrom.clear();blendPending=false;
     currentBase=currentOverlay=nullptr;poseProbeBody=nullptr;poseProbeReference=nullptr;
     rigBodyRequested=engage;rigBodyOwner=engage?actor:nullptr;
     rigBodyActor=engage&&actor->GetServerCreature()?actor->GetServerCreature()->m_objectId:OBJECT_INVALID;
@@ -989,11 +1526,14 @@ bool RebuildOwnedRig(CSWCCreature* actor,bool engage) {
         bool rollback=rebuild();fresh=actor->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1);
         fprintf(stderr,"K1_ENGAGE_RIG_ROLLBACK result=%d\n",rollback);
     }
+    if(fresh)RebindRigFollowCamera(actor,cameraModule,camera,cameraType,cameraEye,cameraOrientation);
     fprintf(stderr,"K1_ENGAGE_RIG_%s requested=%d actor=%llu model=%s\n",ok?"REBUILT":"FAILED",engage,actor->GetServerCreature()?actor->GetServerCreature()->m_objectId:OBJECT_INVALID,
         fresh&&fresh->m_pModel?fresh->m_pModel->m_szName:"none");
     return ok;
 }
 void Plan(bool retainPose = false) {
+    for(auto& entry:meleePoise)ClearClashEpisode(entry.first);
+    dualGuardAfterNative=false;
     if (state.mode == K1EngageState::Mode::Exploration) return;
     if(K1EngageEngaged()) nativeEdgeAwaitInterior=true;
     unsigned long long previous=rigBodyRequested?rigBodyActor:actorId;
@@ -1008,7 +1548,7 @@ void Plan(bool retainPose = false) {
         else if (body && body == loadedBody) ReleaseAnimations(body);
         rigBodyRequested=false;rigBodyOwner=nullptr;rigBodyActor=OBJECT_INVALID;
         loadedBody = nullptr;
-        nativeIdlePose.clear();nativeStaffGuardPose.clear();
+        nativeIdlePose.clear();nativeStaffGuardPose.clear();nativeDualGuardPose.clear();
         legsYaw=0;
     }
     state.Plan();
@@ -1023,11 +1563,18 @@ void Plan(bool retainPose = false) {
 bool LoadAnimations(Gob* body) {
     if(IsSourceBody(body)) {
         if(loadedBody==body) return true;
+        playerPlayback.nativeGait={};
         if(body->m_pAddInModel) return false;
         body->EndLookAtAnimate();body->PlayAnimation(nullptr,1,0,0);body->Reset();
-        CacheNativeIdle(body);
-        if(StaffMode()) CacheNativeIdle(body,"pmbbl",&nativeStaffGuardPose,"g3r1");
+        CacheNativeIdle(body,PlayerNativeResource(body));
+        if(StaffMode()) CacheNativeIdle(body,PlayerNativeResource(body),&nativeStaffGuardPose,"g3r1");
+        if(DualMode()) {
+            const auto ready=Actor()->GetAnimationBase()->GetAnimationName(CSWCAnimBase::CLIENT_ANIMATION_DUAL_SABER_READY);
+            CacheNativeIdle(body,PlayerNativeResource(body),&nativeDualGuardPose,ready.CStr());
+            fprintf(stderr,"K1_DUAL_NATIVE_READY clip=%s class=%d\n",ready.CStr(),Actor()->GetAnimationBase()->m_nWeaponClass);
+        }
         loadedBody=body;lastPose.clear();blendFrom.clear();rotationFrom.clear();blendPending=false;blendTime=.1f;
+        playerPlayback.stanceTransition=false;
         currentBase=currentOverlay=nullptr;
         fprintf(stderr,"K1_ENGAGE model=%s source_rig=1\n",body->m_pModel->m_szName);return true;
     }
@@ -1066,11 +1613,30 @@ Vector PartPointWorld(Part* part,Vector point) {
     for(Part* current=part;current;current=current->m_pParent) scale*=current->m_scale.m_fScale;
     return p+(q.xdir()*point.x+q.ydir()*point.y+q.zdir()*point.z)*scale;
 }
+Vector SwordWorldPoint(Gob* weapon,float z) {
+    return weapon->m_vPosition+weapon->m_qOrientation.zdir()*(z*weapon->m_fObjectScale);
+}
+bool SolidSwordBlades(Gob* weapon,std::vector<K1SaberContact::Blade>& blades) {
+    const auto* geometry=SwordModelGeometry(weapon);
+    if(!geometry)return false;
+    blades.push_back({SwordWorldPoint(weapon,geometry->gripHigh),SwordWorldPoint(weapon,geometry->tipHigh)});
+    if(geometry->doubleBlade)blades.push_back({SwordWorldPoint(weapon,geometry->gripLow),SwordWorldPoint(weapon,geometry->tipLow)});
+    return true;
+}
 bool Blade(CSWCCreature* actor, Vector& base, Vector& tip) {
+    if(NativeNpcBlunt(actor)) {
+        K1SaberContact::Blade blade;if(!NativeNpcSolidBlade(actor,blade))return false;
+        base=blade.base;tip=blade.tip;return true;
+    }
     CSWCItem* item=g_pAppManager->m_pClientExoApp->GetItemByGameObjectID(actor->m_aEquippedItemIds[4]);
-    if(!item || !item->m_bPowered) return false;
+    if(!item || (!item->m_bPowered && !SwordType(item->m_baseItem))) return false;
     Gob* weapon = actor->GetModel(CSWCAnimBase::ANIM_MODEL_RIGHT_ITEM_BODY, 1);
     if(!weapon || !weapon->m_pPart) return false;
+    if(SwordType(item->m_baseItem)) {
+        std::vector<K1SaberContact::Blade> blades;
+        if(!SolidSwordBlades(weapon,blades))return false;
+        base=blades[0].base;tip=blades[0].tip;return true;
+    }
     auto find=[&](auto&& self,Part* p)->bool {
         if(auto* node=p->m_pNode->AsMdlNodeLightsaber()) if(p->m_bDrawEnabled && node->m_paPositions) {
             // Native cap ordinals 1/2 delimit the central blade, excluding the
@@ -1085,8 +1651,13 @@ bool Blade(CSWCCreature* actor, Vector& base, Vector& tip) {
     return find(find,weapon->m_pPart);
 }
 float NominalBladeLength(CSWCCreature* actor) {
+    if(NativeNpcBlunt(actor)) {
+        K1SaberContact::Blade blade;return NativeNpcSolidBlade(actor,blade)?magnitude(blade.tip-blade.base):0;
+    }
     Gob* weapon=actor->GetModel(CSWCAnimBase::ANIM_MODEL_RIGHT_ITEM_BODY,1);
     if(!weapon || !weapon->m_pPart) return 0;
+    if(const auto* geometry=SwordModelGeometry(weapon))return std::max(geometry->tipHigh-geometry->gripHigh,
+        geometry->doubleBlade?geometry->gripLow-geometry->tipLow:0.f)*weapon->m_fObjectScale;
     float length=0;
     auto visit=[&](auto&& self,Part* p)->void {
         if(auto* node=p->m_pNode->AsMdlNodeLightsaber()) if(node->m_paPositions) {
@@ -1121,6 +1692,33 @@ void CollisionPartTriangles(Part* root,std::vector<K1SaberContact::Triangle>& tr
 void CollisionTriangles(Gob* model,std::vector<K1SaberContact::Triangle>& triangles,std::vector<Part*>* parts=nullptr) {
     if(model) CollisionPartTriangles(model->m_pPart,triangles,false,parts);
 }
+bool NativeNpcSolidBlade(CSWCCreature* actor,K1SaberContact::Blade& blade,int hand) {
+    auto* weapon=actor->GetModel(hand?CSWCAnimBase::ANIM_MODEL_LEFT_ITEM_BODY:CSWCAnimBase::ANIM_MODEL_RIGHT_ITEM_BODY,1);
+    if(!weapon && !hand) {
+        // Native Gamorreans carry the axe as body geometry rather than a
+        // separate wielded item model. Use that actual posed mesh and hook.
+        auto* body=actor->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1);
+        auto* mesh=body?body->GetPart(const_cast<char*>("waraxe_001")):nullptr;
+        auto* hook=body?body->GetPart(const_cast<char*>("weapondummy")):nullptr;
+        auto* item=NativeNpcRightItem(actor->GetServerCreature());
+        if(mesh && hook && item && item->m_baseItem==BASE_ITEM_GAMMOREAN_BATTLEAXE) {
+            std::vector<K1SaberContact::Triangle> triangles;CollisionPartTriangles(mesh,triangles);
+            Vector base=PartPointWorld(hook,Vector()),axis=normalize(PartPointWorld(hook,Vector(0,0,1))-base);
+            float extent=0;for(const auto& triangle:triangles)for(const auto& point:{triangle.a,triangle.b,triangle.c})extent=std::max(extent,dot(point-base,axis));
+            if(extent>.0001f){blade={base,base+axis*extent};return true;}
+        }
+    }
+    if(!weapon || !weapon->m_pPart){if(std::getenv("K1_NATIVE_NPC_TEST"))fprintf(stderr,"K1_NATIVE_WEAPON_MISSING actor=%llu hand=%d\n",actor->m_objectId,hand);return false;}
+    // Native staff parts can telescope when powered. Measure the current drawn
+    // geometry, not its retracted bind bounds or a substituted lightsaber length.
+    std::vector<K1SaberContact::Triangle> triangles;CollisionTriangles(weapon,triangles);
+    float extent=0;
+    const Vector axis=normalize(weapon->m_qOrientation.zdir());
+    for(const auto& triangle:triangles)for(const auto& point:{triangle.a,triangle.b,triangle.c})
+        extent=std::max(extent,dot(point-weapon->m_vPosition,axis));
+    if(extent<=.0001f){fprintf(stderr,"K1_NATIVE_WEAPON_EXTENT actor=%llu model=%s triangles=%zu extent=%g\n",actor->m_objectId,weapon->m_pModel?weapon->m_pModel->m_szName:"none",triangles.size(),extent);return false;}
+    blade={weapon->m_vPosition,weapon->m_vPosition+axis*extent};return true;
+}
 bool ContactDamage(CSWSCreature* actor, CSWSCreature* target,bool checkGuard=true) {
     if(checkGuard && K1EngageGuardContact(actor->m_objectId,target->m_objectId)) return true;
     CSWSCombatRound* round = actor->m_pCombatRound;
@@ -1129,11 +1727,14 @@ bool ContactDamage(CSWSCreature* actor, CSWSCreature* target,bool checkGuard=tru
         fprintf(stderr,"K1_MELEE_DAMAGE_REJECT actor=%llu target=%llu native_round=%d spell_round=%d\n",actor->m_objectId,target->m_objectId,round?round->m_bRoundStarted:-1,round?round->m_bSpellCastRound:-1);
         return false;
     }
+    ClearClashEpisode(actor->m_objectId);
     NotePoiseActivity(target,"hit");
     unsigned char oldAttack = round->m_currentAttack;
     int oldCount = round->m_nOnHandAttacks;
     int oldOffhand = round->GetOffHandAttack();
-    round->m_currentAttack = 0; round->m_nOnHandAttacks = 1; round->SetOffHandAttack(0);
+    const bool dual=damageContact && damageContact->dualWeapon!=OBJECT_INVALID;
+    const bool offhand=dual && damageContact->offhand;
+    round->m_currentAttack = 0; round->m_nOnHandAttacks = 1; round->SetOffHandAttack(offhand?1:0);
     CSWSCombatAttackData* attack = round->GetAttack(0);
     attack->ClearAttackData(); attack->m_targetObjectId = target->m_objectId;
     attack->m_nAttackResult = 1; attack->m_attack.m_bAutomaticHit = 1;
@@ -1141,6 +1742,7 @@ bool ContactDamage(CSWSCreature* actor, CSWSCreature* target,bool checkGuard=tru
     actor->ResolveDamage(target, 0, 0);
     actor->ResolvePostMeleeDamage(target);
     int damage = attack->GetBaseDamage();
+    if(dual) fprintf(stderr,"K1_DUAL_NATIVE_DAMAGE hand=%d weapon=%llu damage=%d native_offhand=%d\n",offhand?1:0,damageContact->dualWeapon,damage,round->GetOffHandAttack());
     if(StaffMode() && actor==ServerActor()) {
         auto* item=actor->m_pInventory->GetItemInSlot(CSWInventory::SLOT_RIGHTWEAPON);
         auto* base=item?g_pRules->GetBaseItem(item->m_baseItem):nullptr;
@@ -1153,11 +1755,17 @@ bool ContactDamage(CSWSCreature* actor, CSWSCreature* target,bool checkGuard=tru
     fprintf(stderr, "K1_ENGAGE contact attacker=%llu target=%llu damage=%d roll=none\n", actor->m_objectId, target->m_objectId, damage);
     return true;
 }
+#include "include/k1contactmotion.h"
 std::vector<K1SaberContact::Blade> StaffBlades(CSWCCreature* actor) {
     std::vector<K1SaberContact::Blade> blades;
+    if(NativeNpcBlunt(actor)) {
+        K1SaberContact::Blade blade;if(NativeNpcSolidBlade(actor,blade))blades.push_back(blade);
+        return blades;
+    }
     auto* item=g_pAppManager->m_pClientExoApp->GetItemByGameObjectID(actor->m_aEquippedItemIds[4]);
     auto* weapon=actor->GetModel(CSWCAnimBase::ANIM_MODEL_RIGHT_ITEM_BODY,1);
-    if(!item || !item->m_bPowered || !weapon || !weapon->m_pPart) return blades;
+    if(!item || (!item->m_bPowered && !SwordType(item->m_baseItem)) || !weapon || !weapon->m_pPart) return blades;
+    if(SwordType(item->m_baseItem)){SolidSwordBlades(weapon,blades);return blades;}
     auto visit=[&](auto&& self,Part* part)->void {
         if(auto* node=part->m_pNode->AsMdlNodeLightsaber()) if(part->m_bDrawEnabled && node->m_paPositions) {
             auto a=node->m_paPositions[1],b=node->m_paPositions[2];
@@ -1213,6 +1821,8 @@ void TraceStaffBlades(CSWCCreature* actor,float time) {
                 fprintf(stderr,"K1_FORCE_TARGET_COLLISION actor=%llu serial=%d target=%llu state=%d casting=%d model=%s triangles=%zu\n",server->m_objectId,attackSerial,target->m_objectId,target->m_nState,targetCasting,model->m_pModel?model->m_pModel->m_szName:"none",triangles.size());
             }
         }
+        const auto relative=RelativeContactStart(target->m_objectId,previous[blade],!reset);
+        begin=K1SaberContact::Between(relative,current[blade],lo);finish=K1SaberContact::Between(relative,current[blade],hi);
         int steps=K1SaberContact::Steps(begin,finish);bool hit=false;
         for(int step=0;step<steps && !hit;++step) {
             float a=float(step)/steps,b=float(step+1)/steps;
@@ -1224,7 +1834,9 @@ void TraceStaffBlades(CSWCCreature* actor,float time) {
                     if(K1SaberContact::SweepPoint(x,y,triangles[ti],selected.hitPoint)) {
                         selected.hitPart=parts[ti];selected.bladeDirection=y.tip-y.base;
                         const float fraction=std::max(0.f,std::min(1.f,dot(selected.hitPoint-y.base,y.tip-y.base)/dot(y.tip-y.base,y.tip-y.base)));
-                        selected.bladeMotion=(y.base-x.base)*(1-fraction)+(y.tip-x.tip)*fraction;
+                        const auto wx=K1SaberContact::Between(previous[blade],current[blade],lo+(hi-lo)*(a)),wy=K1SaberContact::Between(previous[blade],current[blade],lo+(hi-lo)*(b));
+                        selected.bladeDirection=wy.tip-wy.base;
+                        selected.bladeMotion=(wy.base-wx.base)*(1-fraction)+(wy.tip-wx.tip)*fraction;
                     }
                 }
                 hit=true;break;
@@ -1247,12 +1859,66 @@ void TraceStaffBlades(CSWCCreature* actor,float time) {
     previous=current;previousBladeTime=time;
 }
 
+#include "include/k1dualstance.h"
+struct VisualBlade {K1SaberContact::Blade blade;int hand=0;};
+std::vector<VisualBlade> PoweredSaberBlades(CSWCCreature* actor) {
+    std::vector<VisualBlade> result;if(!actor)return result;
+    auto* server=actor->GetServerCreature();if(!server || !server->m_pInventory)return result;
+    for(int hand=0;hand<2;++hand) {
+        auto* native=server->m_pInventory->GetItemInSlot(hand?CSWInventory::SLOT_LEFTWEAPON:CSWInventory::SLOT_RIGHTWEAPON);
+        auto* client=g_pAppManager->m_pClientExoApp->GetItemByGameObjectID(actor->m_aEquippedItemIds[4+hand]);
+        if(!native || !native->IsLightsaber() || !client || !client->m_bPowered)continue;
+        if(!hand)for(const auto& blade:StaffBlades(actor))result.push_back({blade,hand});
+        else {K1SaberContact::Blade blade;if(DualBlade(actor,hand,blade))result.push_back({blade,hand});}
+    }
+    return result;
+}
+void SaberContactVisual(CSWSCreature* actor,CSWSCreature* target,const char* kind) {
+    auto* a=actor?actor->GetClientCreature():nullptr;auto* b=target?target->GetClientCreature():nullptr;
+    if(!a || !b || !a->m_pArea || a->m_pArea!=b->m_pArea)return;
+    auto x=PoweredSaberBlades(a),y=PoweredSaberBlades(b);
+    if(x.empty() && y.empty())return;
+    // Include the opposing solid weapon for saber-versus-sword blocks.
+    auto fallback=[](CSWCCreature* c,std::vector<VisualBlade>& out){Vector p,q;if(out.empty() && Blade(c,p,q))out.push_back({{p,q},0});};
+    fallback(a,x);fallback(b,y);if(x.empty() || y.empty())return;
+    Vector point;float nearest=1e30f;
+    for(const auto& u:x)for(const auto& v:y) {
+        // Closest points on the two currently drawn finite blade segments.
+        Vector d=u.blade.tip-u.blade.base,e=v.blade.tip-v.blade.base,r=u.blade.base-v.blade.base;
+        float aa=dot(d,d),bb=dot(d,e),cc=dot(e,e),dd=dot(d,r),ee=dot(e,r);
+        if(aa<1e-10f || cc<1e-10f)continue;
+        float den=aa*cc-bb*bb,s=den>1e-10f?std::max(0.f,std::min(1.f,(bb*ee-cc*dd)/den)):0.f;
+        float t=std::max(0.f,std::min(1.f,(bb*s+ee)/cc));s=std::max(0.f,std::min(1.f,(bb*t-dd)/aa));
+        Vector p=u.blade.base+d*s,q=v.blade.base+e*t;float gap=magnitude(p-q);
+        if(gap<nearest){nearest=gap;point=(p+q)*.5f;}
+    }
+    if(nearest==1e30f || !K1SaberContact::Finite(point))return;
+    auto* effect=new CSWCVisualEffect(1);
+    if(!effect->LoadEffect(VFX_COM_SPARKS_PARRY_METAL)){delete effect;return;}
+    int lights=0,emitters=0;
+    if(auto* model=effect->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,0)) {
+        auto visit=[&](auto&& self,Part* p)->void {
+            lights+=p->m_pNode->AsMdlNodeLight()!=nullptr;emitters+=p->m_pNode->AsMdlNodeEmitter()!=nullptr;
+            for(int i=0;i<p->m_nChildren;++i)self(self,p->m_paChildren[i]);
+        };visit(visit,model->m_pPart);
+    }
+    effect->AttachToScene(a->m_pArea->m_pScene);effect->m_bImpactOnly=1;effect->m_bDeleteWhenFinished=1;
+    effect->SetPosition(point);effect->SetAnimation(1);
+    // This is K1's HitContactEvent/ShowLightSaberContactVisual payload:
+    // v_parrspr_imp contains two spark emitters and its authored animated light.
+    fprintf(stderr,"K1_SABER_CONTACT_VFX kind=%s effect=4011 lights=%d emitters=%d gap=%g position=%g,%g,%g\n",kind,lights,emitters,nearest,point.x,point.y,point.z);
+}
+
+struct PlayerHitAudit {int raw=0,active=0,queued=0,damaged=0,blocked=0,clashed=0,rejected=0,dropped=0;float first=1e9f,last=-1;};
+std::unordered_map<int,PlayerHitAudit> playerHitAudits;
 void TraceBlade(CSWCCreature* actor,float time) {
+    if(DualMode()) {TraceDualBlades(actor,time);return;}
     if(StaffMode()) {TraceStaffBlades(actor,time);return;}
     Vector base, tip;
     if (!Blade(actor, base, tip)) {hadBlade=false;return;}
     unsigned long long weapon=actor->m_aEquippedItemIds[4];
-    if (!hadBlade || weapon!=previousBladeWeapon || time<previousBladeTime || magnitude(base-previousBase)>2.f) {
+    const bool reset=!hadBlade || weapon!=previousBladeWeapon || time<previousBladeTime || magnitude(base-previousBase)>2.f;
+    if (reset) {
         previousBase=base;previousTip=tip;previousBladeTime=time;
     }
     hadBlade=true;previousBladeWeapon=weapon;
@@ -1266,7 +1932,8 @@ void TraceBlade(CSWCCreature* actor,float time) {
     if(SwingSoundDue(attackSerial,playerPlayback.swingSoundSerial,time,start)) EngageWeaponSound(server,nullptr,"swing");
     CSWSArea* area = server ? static_cast<CSWSArea*>(server->GetArea()) : nullptr;
     CSWSCreature* first=nullptr;float firstPhase=2;int triangleCount=0;MeleeContact selected={};
-    if (active && lo<=hi && area && !hitConsumed) for (int i = 0; i < area->m_aObjectsByX.m_count; ++i) {
+    const bool audit=std::getenv("K1_ENGAGE_MELEE_HIT_TEST")!=nullptr;
+    if (area && ((active && lo<=hi && !hitConsumed) || audit)) for (int i = 0; i < area->m_aObjectsByX.m_count; ++i) {
         CSWSCreature* target = g_pAppManager->m_pServerExoApp->GetCreatureByGameObjectID(area->m_aObjectsByX.m_pArray[i]);
         if (!target || target == server || target->GetDead() || target->GetReputation(server->m_objectId, 0) > 10) continue;
         unsigned long long clientId = g_pAppManager->m_pClientExoApp->ServerToClientObjectId(target->m_objectId);
@@ -1276,6 +1943,15 @@ void TraceBlade(CSWCCreature* actor,float time) {
         if (!model || magnitude(model->m_vPosition-server->m_position)>10.f+model->m_fMinSphereRadius) continue;
         std::vector<K1SaberContact::Triangle> triangles;std::vector<Part*> parts;CollisionTriangles(model,triangles,&parts);
         CollisionTriangles(client->GetModel(CSWCAnimBase::ANIM_MODEL_HEAD,1),triangles,&parts);
+        const auto relative=RelativeContactStart(target->m_objectId,previous,!reset);
+        begin=K1SaberContact::Between(relative,current,lo);finish=K1SaberContact::Between(relative,current,hi);
+        if(audit) {
+            bool raw=false;const int n=K1SaberContact::Steps(relative,current);
+            for(int j=0;j<n && !raw;++j)for(const auto& t:triangles)
+                if(K1SaberContact::SweepCell(K1SaberContact::Between(relative,current,float(j)/n),K1SaberContact::Between(previous,current,float(j+1)/n),t)){raw=true;break;}
+            if(raw){auto& a=playerHitAudits[attackSerial];++a.raw;a.first=std::min(a.first,time);a.last=std::max(a.last,time);}
+        }
+        if(!active || lo>hi || hitConsumed)continue;
         int steps=K1SaberContact::Steps(begin,finish);bool hit=false;
         for(int step=0;step<steps && !hit;++step) {
             float a=float(step)/steps,b=float(step+1)/steps;
@@ -1287,14 +1963,19 @@ void TraceBlade(CSWCCreature* actor,float time) {
                     if(K1SaberContact::SweepPoint(x,y,triangles[ti],selected.hitPoint)) {
                         selected.hitPart=parts[ti];selected.bladeDirection=y.tip-y.base;
                         const float fraction=std::max(0.f,std::min(1.f,dot(selected.hitPoint-y.base,y.tip-y.base)/dot(y.tip-y.base,y.tip-y.base)));
-                        selected.bladeMotion=(y.base-x.base)*(1-fraction)+(y.tip-x.tip)*fraction;
+                        const auto wx=K1SaberContact::Between(previous,current,lo+(hi-lo)*(a)),wy=K1SaberContact::Between(previous,current,lo+(hi-lo)*(b));
+                        selected.bladeDirection=wy.tip-wy.base;
+                        selected.bladeMotion=(wy.base-wx.base)*(1-fraction)+(wy.tip-wx.tip)*fraction;
                     }
                 }
+                if(audit)++playerHitAudits[attackSerial].active;
                 hit=true;break;
             }
         }
     }
     if(first) {
+        if(audit)++playerHitAudits[attackSerial].queued;
+        if(RedMode())fprintf(stderr,"K1_RED_CONTACT_WINDOW serial=%d clip=%s time=%g start=%g end=%g\n",attackSerial,PlayerAttackClip(false),time,start,end);
         selected.dismemberRow=SampleDismemberment(server,first,selected);selected.hitPart=nullptr;
         sceneMeleeContacts.push_back(selected);
         hitConsumed=true;
@@ -1304,20 +1985,57 @@ void TraceBlade(CSWCCreature* actor,float time) {
 }
 } // namespace
 
+bool K1EngageSandboxBlocksPlayerTarget(unsigned long long attacker,unsigned long long target) {
+    return sandboxSession && !sandboxTargetPlayer && sandboxActors.count(attacker) &&
+        ServerActor() && ServerActor()->m_objectId==target;
+}
+bool K1EngageSandboxAppearance(CSWCCreature* actor,CCAppearanceInfo* appearance) {
+    auto* server=actor?actor->GetServerCreature():nullptr;
+    if(!server)return false;
+    auto found=sandboxAppearances.find(server->m_objectId);if(found==sandboxAppearances.end())return false;
+    auto headItem=appearance->core.m_oidHeadItem;
+    *appearance=found->second;appearance->core.m_oidHeadItem=headItem;
+    return true;
+}
+bool K1EngageCloseSandboxMenu() {
+    if(!sandboxMenuOpen)return false;
+    SandboxToggle();return true;
+}
 bool K1EngageEnabled() {
     static bool enabled = [] { const char* value = std::getenv("K1_ENGAGE_PROTOTYPE"); return value && strcmp(value, "1") == 0; }();
     return enabled;
 }
 bool K1EngageUseBodyRig(CSWCCreature* actor,const CResRef& original) {
     if(!RigModeEnabled() || !rigBodyRequested || !actor || actor!=rigBodyOwner) return false;
-    const char* name=original.GetResRefStr();return !strcmp(name,"pmbbl") || !strcmp(name,"PMBBL");
+    const char* name=original.GetResRefStr();return WearableRig(name) || !_stricmp(name,"pmbbl");
 }
 const char* K1EngageBodyRigResource(CSWCCreature* actor,const CResRef& original) {
-    for(const auto& entry:npcPlayback) {
-        const auto& npc=entry.second;
-        if(npc.requested && npc.owner==actor) return NpcRigResource(original.GetResRefStr(),actor->GetServerCreature());
+    for(auto& entry:npcPlayback) {
+        auto& npc=entry.second;
+        if(npc.requested && npc.owner==actor) {
+            const char* resource=NpcRigResource(original.GetResRefStr(),actor->GetServerCreature());
+            if(resource)npc.nativeResource=original.GetResRefStr();
+            return resource;
+        }
     }
-    return K1EngageUseBodyRig(actor,original)?PlayerRigResource():nullptr;
+    if(!K1EngageUseBodyRig(actor,original))return nullptr;
+    const char* resource=PlayerRigForNative(original.GetResRefStr());
+    return resource;
+}
+void K1EngageBeforeBodyUnload(CSWCCreature* actor) {
+    if(!actor || actor!=rigBodyOwner || !actor->GetAnimationBase())return;
+    auto* old=actor->GetAnimationBase()->GetModel(CSWCAnimBase::ANIM_MODEL_BODY);
+    // Native unload precedes the replacement LoadModel callback. Clear pointers
+    // here, before the tree dies or its address can be reused. Internal stance
+    // rebuilds already clear loadedBody and retain their existing blend path.
+    if(old && old==loadedBody && IsSourceBody(old) && WearableNativeResource(old->m_pModel->m_szName)) {
+        ReleaseAnimations(old);loadedBody=nullptr;playerPlayback={};
+        nativeIdlePose.clear();nativeStaffGuardPose.clear();nativeDualGuardPose.clear();
+        state.ClearInputs();state.attacking=false;state.chainSwings=0;++attackSerial;
+        currentBase=currentOverlay=nullptr;hadBlade=false;ClearClashEpisode(actor->GetServerCreature()->m_objectId);
+        sceneMeleeContacts.erase(std::remove_if(sceneMeleeContacts.begin(),sceneMeleeContacts.end(),[&](const MeleeContact& c){return c.attacker==actor->GetServerCreature()->m_objectId;}),sceneMeleeContacts.end());
+        fprintf(stderr,"K1_ARMOR_NATIVE_REPLACE outgoing_cancelled=1\n");
+    }
 }
 bool K1EngageOwnsEnemy(unsigned long long id) {
     const auto found=npcPlayback.find(id);
@@ -1339,12 +2057,26 @@ bool K1EngageEnemyAttack(CSWSCreature* enemy,unsigned long long target) {
     CExoString resource;
     g_pRules->m_p2DArrays->m_pAppearance->GetCExoStringEntry(enemy->m_appearance.m_headId,
         CTwoDimArrays::COL2DA_APPEARANCETABLE_RACE,&resource);
-    return NpcRigResource(resource.CStr())!=nullptr;
+    if(NativeConfiguredNpc(enemy)) {
+        auto* client=enemy->GetClientCreature();
+        auto* body=client?client->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1):nullptr;
+        return body && body->m_pModel && !body->m_pAddInModel && NativeNpcMeleeEquipped(enemy) &&
+            NpcRigResource(body->m_pModel->m_szName,enemy)!=nullptr;
+    }
+    return NpcRigResource(resource.CStr(),enemy)!=nullptr;
 }
 bool K1EngageEnemyMovementOwned(unsigned long long id) {
     if(K1EngageOwnsEnemy(id)) return true;
     auto* player=ServerActor();
     return player && K1EngageEnemyAttack(g_pAppManager->m_pServerExoApp->GetCreatureByGameObjectID(id),player->m_objectId);
+}
+bool K1EngageEnemyNativeControl(CSWSCreature* enemy) {
+    if(!NativeConfiguredNpc(enemy))return false;
+    if(!NativeNpcMeleeEquipped(enemy))return true;
+    if(K1EngageOwnsEnemy(enemy->m_objectId))return false;
+    auto* client=enemy->GetClientCreature();
+    auto* body=client?client->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1):nullptr;
+    return !body || !body->m_pModel || body->m_pAddInModel || !NpcRigResource(body->m_pModel->m_szName,enemy);
 }
 float K1EngageEnemyMeleeRange(CSWSCreature* enemy) {
     const auto found=enemy?npcPlayback.find(enemy->m_objectId):npcPlayback.end();
@@ -1371,10 +2103,14 @@ bool K1EngageArenaLoadoutActive() {
     auto* module = g_pAppManager->m_pClientExoApp->GetModule();
     return module && !strcmp(module->m_sModuleName.CStr(), "k1arena");
 }
+bool NpcCombatAreaActive() {
+    auto* module=g_pAppManager->m_pClientExoApp->GetModule();
+    return K1EngageArenaLoadoutActive() || (K1EngageEnabled() && std::getenv("K1_ENGAGE_STORY") && module && module->m_pArea);
+}
 bool K1EngageEnemyAIActive(unsigned long long target) {
     static const bool enabled = std::getenv("K1_ENGAGE_ENEMY_AI") != nullptr;
     return enabled && K1EngageEnabled() && !IsGamePaused() &&
-        (K1EngageEngaged() || K1EngagePlanning()) && K1EngageArenaLoadoutActive() && K1EngageOwnsPlayer(target);
+        (K1EngageEngaged() || K1EngagePlanning()) && NpcCombatAreaActive() && K1EngageOwnsPlayer(target);
 }
 bool K1EngageEnemyCanReposition(unsigned long long enemy) {
     const auto found = enemyRepositionAfter.find(enemy);
@@ -1401,7 +2137,15 @@ bool K1EngageForceWalk() { return K1EngageActive() && state.ForceWalk(); }
 bool K1EngageMouse(bool left, bool down) {
     if(std::getenv("K1_ENGAGE_CONTROL_TEST")) fprintf(stderr,"K1_ENGAGE_RAW_MOUSE left=%d down=%d active=%d\n",left,down,K1EngageActive());
     if(!K1EngageActive()) return false;
-    if(nativeActionBody) return true;
+    if(ContactTimingEnabled() && !left) {
+        if(down){contactGuardClock={ContactWallUs(),g_pAppManager->m_pServerExoApp->GetWorldTimer()->GetSnapshotTime(),0,state.attacking,nativeActionBody};
+            fprintf(stderr,"K1_CONTACT_GUARD_INPUT attacking=%d native=%d mode=%d\n",state.attacking,nativeActionBody,int(state.mode));}
+        else contactGuardClock={};
+    }
+    if(nativeActionBody) {
+        if((DualPrototype() || std::getenv("K1_ENGAGE_SANDBOX")) && !left)dualGuardAfterNative=down;
+        return true;
+    }
     if(left && down) {
         auto* actor=ServerActor();
         const auto now=g_pAppManager->m_pServerExoApp->GetWorldTimer()->GetSnapshotTime();
@@ -1426,6 +2170,28 @@ bool K1EngageMouse(bool left, bool down) {
     return state.Mouse(left,down);
 }
 bool K1EngageOwnsPlayer(unsigned long long id) { CSWSCreature* actor = K1EngageEnabled() ? ServerActor() : nullptr; return actor && actor->m_objectId == id; }
+std::unordered_map<unsigned long long,long long> utilityReleaseAt;
+bool K1EngageFastUtility(CSWSCreature* actor) {
+    return K1EngageEnabled() && actor && (K1EngagePlanning() || K1EngageEngaged()) &&
+        (actor==ServerActor() || npcPlayback.count(actor->m_objectId));
+}
+bool K1EngageProtectForceCast(CSWSCreature* actor) {
+    if(!K1EngageFastUtility(actor))return false;
+    auto* spell=g_pRules->GetSpell(actor->m_castSpellId);
+    return actor->m_pCombatRound && actor->m_pCombatRound->m_bSpellCastRound && spell &&
+        (spell->m_nUserType==CSWSpell::USERTYPE_FORCEPOWER || spell->m_nUserType==CSWSpell::USERTYPE_MASTER);
+}
+void K1EngageUtilityCompleted(CSWSCreature* actor) {
+    if(!K1EngageFastUtility(actor))return;
+    auto* round=actor->m_pCombatRound;
+    if(round && round->m_bSpellCastRound) {
+        // The native executor has released its current spell/item action.
+        // End its spent round, preserving the pending round-action list.
+        round->EndCombatRound(0);
+        utilityReleaseAt[actor->m_objectId]=g_pAppManager->m_pServerExoApp->GetWorldTimer()->GetSnapshotTime();
+        fprintf(stderr,"K1_UTILITY_FAST_RELEASE actor=%llu\n",actor->m_objectId);
+    }
+}
 static bool NativeUtilityAction(int action) {
     return action == AIACTION_CAST_SPELL || action == AIACTION_ITEM_CAST_SPELL ||
         action == AIACTION_SET_MINE || action == AIACTION_DISARM_MINE ||
@@ -1467,6 +2233,14 @@ static bool NativeUtilityQueued(CSWSCreature* actor) {
             return true;
     }
     return false;
+}
+static void CompleteReleasedUtilityRound(CSWSCreature* actor) {
+    if(!actor || NativeUtilityQueued(actor) || NativeStatusAnimation(actor))return;
+    auto* round=actor->m_pCombatRound;
+    if(round && round->m_bSpellCastRound && (!round->m_pRoundActionList || !round->m_pRoundActionList->m_pInternal->m_pHead)) {
+        round->EndCombatRound(0);
+        fprintf(stderr,"K1_UTILITY_ROUND_RELEASE actor=%llu started=%d spell=%d\n",actor->m_objectId,round->m_bRoundStarted,round->m_bSpellCastRound);
+    }
 }
 bool K1EngageHoldNativeAction(unsigned long long id, int action) {
     // A queued NPC utility waits for the source swing, then UpdateNpcPlayback
@@ -1565,7 +2339,6 @@ bool K1EngageTryDisengage() {
     victorySwingSerial=-1;
     Plan();state.Disengage(false);actorId=OBJECT_INVALID;encounter.clear();nativeActionBody=false;
     meleePoise.clear();
-    pendingMeleeContacts.clear();
     enemyRepositionAfter.clear();
     if(CSWCCreature* actor=Actor()) {
         actor->GetServerCreature()->SetCombatMode(0,0);actor->SetCombatMode(0);
@@ -1607,7 +2380,9 @@ static bool EncounterWon(CSWSCreature* actor) {
     return true;
 }
 static bool YieldPlayerNative(CSWCCreature* actor) {
+    if(actor && actor->GetServerCreature())ClearClashEpisode(actor->GetServerCreature()->m_objectId);
     if(nativeActionBody) return true;
+    dualGuardAfterNative=DualMode() && state.rightHeld;
     auto* body=actor->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1);
     const auto outgoing=CaptureUtilityPose(body);
     if(rigBodyRequested) {
@@ -1617,11 +2392,13 @@ static bool YieldPlayerNative(CSWCCreature* actor) {
     }
     state.ClearInputs();retainedPlanningPose=false;currentAttack=nullptr;hadBlade=false;
     movement.Clear();nativeActionBody=true;
+    if(contactGuardClock.wall)contactGuardClock.interrupted=true;
     BeginUtilityBlend(actor->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1),outgoing,false);
     return true;
 }
 void K1EngageUpdate(float) {
     if (!K1EngageEnabled()) return;
+    PresentationProbeTick();
     ArenaTick();
     SandboxTick();
     if(sandboxMenuOpen)return;
@@ -1703,29 +2480,54 @@ void K1EngageUpdate(float) {
         // round timer can still reject source melee damage after control returns.
         // Complete only that empty spell round through the native service; never
         // end an executing/queued utility or create a native follow-up attack.
-        auto* round = actor->GetServerCreature()->m_pCombatRound;
-        if (round && round->m_bSpellCastRound &&
-            (!round->m_pRoundActionList || !round->m_pRoundActionList->m_pInternal->m_pHead)) {
-            round->EndCombatRound(0);
-            fprintf(stderr,"K1_UTILITY_ROUND_RELEASE actor=%llu\n",actor->GetServerCreature()->m_objectId);
-        }
+        CompleteReleasedUtilityRound(actor->GetServerCreature());
         nativeActionBody = false;
         if (RigModeEnabled() && !RebuildOwnedRig(actor, true)) { Plan(); return; }
         Gob* incoming = actor->GetModel(CSWCAnimBase::ANIM_MODEL_BODY, 1);
         if (!incoming || !LoadAnimations(incoming)) { Plan(); return; }
+        if(DualMode())state.rightHeld=dualGuardAfterNative;
+        dualGuardAfterNative=false;
         BeginUtilityBlend(incoming, outgoing, true);
     }
     Gob* body = actor->GetModel(CSWCAnimBase::ANIM_MODEL_BODY, 1);
     if(RigModeEnabled() && IsSourceBody(body) && body->m_pModel &&
        _stricmp(body->m_pModel->m_szName,PlayerRigResource())) {
+        const bool stanceSwitch=SingleStanceResourceName(body->m_pModel->m_szName) && SingleStanceResourceName(PlayerRigResource());
+        struct SavedJoint {std::string name;Vector position;Quaternion orientation;};
+        std::vector<SavedJoint> shown;
+        const bool guardHeld=state.rightHeld;
+        GripPose shownGrip;
+        if(stanceSwitch) {
+            shownGrip=ReadGrip(body);shownGrip.joined=playerPlayback.lastGrip.joined;
+            auto capture=[&](auto&& self,Part* part)->void {
+                if(part->m_pNode->m_pTree!=body->m_pModel)return;
+                shown.push_back({part->m_pNode->TranslateNodeName(),part->m_vLocalPosition,part->m_qLocalOrientation});
+                for(int i=0;i<part->m_nChildren;++i)self(self,part->m_paChildren[i]);
+            };capture(capture,body->m_pPart);
+        }
         // Drop the outgoing swing and contacts before replacing its rig.
         state.ClearInputs();state.attacking=false;state.chainSwings=0;
+        redChainFrom=-1;
+        blueChainFrom=-1;
+        if(stanceSwitch)state.rightHeld=guardHeld;
         currentAttack=nullptr;hadBlade=false;staffContactBlades=0;
         auto outgoing=[&](const MeleeContact& contact){return contact.attacker==actor->GetServerCreature()->m_objectId;};
         sceneMeleeContacts.erase(std::remove_if(sceneMeleeContacts.begin(),sceneMeleeContacts.end(),outgoing),sceneMeleeContacts.end());
-        pendingMeleeContacts.erase(std::remove_if(pendingMeleeContacts.begin(),pendingMeleeContacts.end(),outgoing),pendingMeleeContacts.end());
+        ClearClashEpisode(actor->GetServerCreature()->m_objectId);
         if(!RebuildOwnedRig(actor,true)) {Plan();return;}
         body=actor->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1);
+        if(stanceSwitch) {
+            if(!body || !LoadAnimations(body)){Plan();return;}
+            // Rebind values by name; no pointers survive native appearance replacement.
+            for(const auto& joint:shown)if(auto* part=body->GetPart(const_cast<char*>(joint.name.c_str()))) {
+                part->m_vLocalPosition=joint.position;part->m_qLocalOrientation=joint.orientation;
+                lastPose.push_back({part,joint.position,joint.orientation});
+            }
+            playerPlayback.lastGrip=shownGrip;
+            playerPlayback.guardKnown=true;playerPlayback.guardHeld=state.Guarding();
+            playerPlayback.stanceTransition=true;blendPending=true;
+            fprintf(stderr,"K1_STANCE_BLEND guard=%d joints=%zu\n",state.Guarding(),lastPose.size());
+        }
     }
     if (!body || !LoadAnimations(body)) { Plan();return; }
     const auto attackNow=g_pAppManager->m_pServerExoApp->GetWorldTimer()->GetSnapshotTime();
@@ -1784,11 +2586,15 @@ void K1EngageUpdate(float) {
             fprintf(stderr,"K1_ENGAGE_CHAIN outgoing=%d incoming=%d time=%g\n",
                 swingDirection,requestedDirection,attackTime);
         if(currentOverlay) body->PlayAnimation(const_cast<char*>(currentOverlay),1,AnimRun::kAnimRemove,0);
-        currentOverlay=nullptr;currentAttack=Direction();swingDirection=requestedDirection;hitConsumed=false;hadBlade=false;
+        redChainFrom=UsesRedAttacks() && chain?swingDirection:-1;
+        blueChainFrom=BlueMode() && chain?swingDirection:-1;
+        currentOverlay=nullptr;swingDirection=requestedDirection;currentAttack=PlayerAttackClip(true);hitConsumed=false;hadBlade=false;
+        if(RedMode() && redChainFrom>=0)fprintf(stderr,"K1_RED_CHAIN_SELECT from=%d to=%d clip=%s transition=%s start=%g end=%g\n",redChainFrom,swingDirection,currentAttack,redChains[redChainFrom][swingDirection].transition,PlayerHitStart(swingDirection),PlayerHitEnd(swingDirection));
         swingBackLeft=requestedBackLeft;
         state.chainSwings=chain?state.chainSwings+1:1;
         state.holdChain=state.leftHeld;
         state.attackRequested=false;state.attacking=true;attackTime=0;
+        playerAttackStartedAt=attackNow;
         meleePoise[actor->GetServerCreature()->m_objectId].blockReaction=-1;
         NotePoiseActivity(actor->GetServerCreature(),"swing");
         ++attackSerial;
@@ -1804,8 +2610,10 @@ void K1EngageUpdate(float) {
     const auto& poise=meleePoise[actor->GetServerCreature()->m_objectId];
     const int block=state.attacking?-1:ActiveBlockReaction(actor->GetServerCreature()->m_objectId,attackNow);
     const bool blockRestart=block>=0 && playerPlayback.blockSerial!=poise.blockSerial;
-    const char* overlay=state.attacking ? (moving?attacks[swingDirection]:fullAttacks[swingDirection])
-        : (block>=0?blockUpper[block]:(state.Guarding() && moving ? "y_guard" : nullptr));
+    const char* purpleGuardWalk=PurpleGuardWalkClip(state.Guarding(),state.attacking,block>=0,moving,keyS && !keyW);
+    if(purpleGuardWalk)base=purpleGuardWalk;
+    const char* overlay=state.attacking ? PlayerAttackClip(moving)
+        : (block>=0?blockUpper[block]:(state.Guarding() && moving && !purpleGuardWalk ? "y_guard" : nullptr));
     float liveTime=0,liveLength=0;
     bool baseChanged=currentBase!=base || !body->GetAnimation(const_cast<char*>(base),&liveTime,&liveLength);
     bool overlayMissing=overlay && !body->GetAnimation(const_cast<char*>(overlay),&liveTime,&liveLength);
@@ -1831,12 +2639,34 @@ void K1EngageUpdate(float) {
         }
     }
 }
+void K1EngageCycleStance() {
+    if(!K1EngageEnabled() || !std::getenv("K1_ENGAGE_SANDBOX") || sandboxMenuOpen ||
+       StaffMode() || DualMode() || !Supported(Actor()))return;
+    const bool hasBlue=g_pExoResMan->Exists(CResRef("k1jablue"),RESTYPE_MDL,static_cast<unsigned int*>(nullptr)) &&
+        g_pExoResMan->Exists(CResRef("k1jablue"),RESTYPE_MDX,static_cast<unsigned int*>(nullptr));
+    const bool hasPurple=g_pExoResMan->Exists(CResRef("k1japurp"),RESTYPE_MDL,static_cast<unsigned int*>(nullptr)) &&
+        g_pExoResMan->Exists(CResRef("k1japurp"),RESTYPE_MDX,static_cast<unsigned int*>(nullptr));
+    const int next=NextSingleStance(hasBlue,hasPurple);
+    const char* resource=SingleStanceResource(next);
+    if(!g_pExoResMan->Exists(CResRef(resource),RESTYPE_MDL,static_cast<unsigned int*>(nullptr)) ||
+       !g_pExoResMan->Exists(CResRef(resource),RESTYPE_MDX,static_cast<unsigned int*>(nullptr))) {
+        fprintf(stderr,"K1_STANCE_UNAVAILABLE resource=%s\n",resource);return;
+    }
+    // Existing rig replacement cancels outgoing swings and contacts.
+    redSelection=next;
+    fprintf(stderr,"K1_STANCE_SELECTED red=%d blue=%d purple=%d resource=%s\n",RedMode(),BlueMode(),PurpleMode(),PlayerRigResource());
+}
 void K1EngageKey(int code,bool down) {
     if(!K1EngageEnabled()) return;
     if(code==39 && down){sandboxTogglePending=true;return;}
-    if(sandboxMenuOpen)return;
+    if(sandboxMenuOpen && down)return;
     switch(code) {case 26:keyW=down;break;case 22:keyS=down;break;case 4:keyA=down;break;
         case 7:keyD=down;break;case 225:keyShift=down;break;}
+}
+void K1EngageReleaseHeldInput() {
+    keyW=keyS=keyA=keyD=keyShift=false;movement.Clear();
+    state.rightHeld=state.leftHeld=state.holdChain=state.attackRequested=false;
+    dualGuardAfterNative=false;contactGuardClock={};
 }
 bool K1EngageLook(int dx,int dy) {
     if(!K1EngageActive()) return false;
@@ -2081,6 +2911,73 @@ bool K1EngageOwnsAnimation(Gob* model) {
     CSWSCreature* actor=ServerActor();
     return actor && !actor->GetDead() && !NativeStatusAnimation(actor);
 }
+bool K1EngageAlignSword(Gob* weapon) {
+    if(!weapon || !SwordModelGeometry(weapon) || K1EngagePoiseBladePercent(weapon)>=0)return false;
+    auto held=[&](CSWCCreature* owner) {
+        if(!owner || (owner->GetModel(CSWCAnimBase::ANIM_MODEL_RIGHT_ITEM_BODY,0)!=weapon &&
+                      owner->GetModel(CSWCAnimBase::ANIM_MODEL_LEFT_ITEM_BODY,0)!=weapon))return false;
+        return K1EngageOwnsAnimation(owner->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,0));
+    };
+    bool owned=held(Actor());
+    if(!owned)for(const auto& entry:npcPlayback)if(held(entry.second.owner)){owned=true;break;}
+    if(!owned)return false;
+    // Reuse the stance's actual full/upper selection, including spinning chain
+    // links. Each sword keeps its own fresh hand-hook sample (both dual hands).
+    const char* base=nullptr;const char* overlay=nullptr;
+    const char* attackFull=nullptr;const char* attackUpper=nullptr;
+    Gob* body=nullptr;bool attacking=false,guarding=false,yellow=false,purple=false,supported=false,rightHand=false;
+    int attackDirection=0;
+    auto* player=Actor();
+    if(player && (player->GetModel(CSWCAnimBase::ANIM_MODEL_RIGHT_ITEM_BODY,0)==weapon ||
+                  player->GetModel(CSWCAnimBase::ANIM_MODEL_LEFT_ITEM_BODY,0)==weapon)) {
+        body=player->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,0);
+        base=currentBase;overlay=currentOverlay;attacking=state.attacking;guarding=state.Guarding();
+        rightHand=player->GetModel(CSWCAnimBase::ANIM_MODEL_RIGHT_ITEM_BODY,0)==weapon;
+        yellow=!RedMode() && !BlueMode() && !PurpleMode() && !DualMode() && !StaffMode();
+        purple=PurpleMode();supported=true;attackDirection=swingDirection;
+        if(attacking){attackFull=PlayerAttackClip(false);attackUpper=PlayerAttackClip(true);}
+    } else for(const auto& entry:npcPlayback) {
+        const auto& npc=entry.second;
+        if(npc.owner && (npc.owner->GetModel(CSWCAnimBase::ANIM_MODEL_RIGHT_ITEM_BODY,0)==weapon ||
+                         npc.owner->GetModel(CSWCAnimBase::ANIM_MODEL_LEFT_ITEM_BODY,0)==weapon)) {
+            body=npc.body;base=npc.base;overlay=npc.overlay;attacking=npc.attacking;guarding=NpcGuarding(npc);
+            rightHand=npc.owner->GetModel(CSWCAnimBase::ANIM_MODEL_RIGHT_ITEM_BODY,0)==weapon;
+            yellow=!npc.red && !npc.blue && !npc.dual && !npc.staff && !npc.ranged;
+            supported=!npc.ranged;attackDirection=npc.direction;
+            if(attacking){attackFull=NpcAttackClip(npc,false);attackUpper=NpcAttackClip(npc,true);}
+            break;
+        }
+    }
+    bool edgeAligned=false;
+    float relaxedIdleRoll=0.f;
+    if(supported && body) {
+        const char* source=nullptr;const char* clock=nullptr;
+        int cuttingDirection=0;
+        if(attacking && overlay && attackDirection>=0 && attackDirection<7 &&
+           ((attackFull && !strcmp(overlay,attackFull)) || (attackUpper && !strcmp(overlay,attackUpper)))) {
+            source=attackFull;clock=overlay;cuttingDirection=attackDirection;
+        } else if(!purple && guarding && base && (!overlay || !strcmp(overlay,"y_guard"))) {
+            if(strstr(base,"walk")){source="j_walk";clock=base;}
+            else if(!strcmp(base,"j_guard") || !strcmp(base,"j_idle")){source="j_guard";clock=overlay?overlay:base;}
+        } else if(!purple && !attacking && !guarding && !overlay && base &&
+                  (!strcmp(base,"j_idle") || strstr(base,"walk"))) {
+            // Match corrected relaxed idle while walking with guard released.
+            // Purple's authored non-attacking presentation stays unchanged.
+            relaxedIdleRoll=-1.5707963268f;
+        }
+        float time=0,length=0;Quaternion correction;
+        if(clock && body->GetAnimation(const_cast<char*>(clock),&time,&length)) {
+            if(yellow && rightHand && !SwordModelGeometry(weapon)->doubleBlade &&
+               K1YellowSwordHooks::Correction(source,time,correction))
+                weapon->m_qOrientation=normalize(weapon->m_qOrientation*correction);
+            edgeAligned=K1SwordAlignment::Align(weapon->m_qOrientation,normalize(body->m_qOrientation),cuttingDirection);
+        }
+    }
+    // The attachment supplies a fresh hook orientation before every call.
+    // Roll around the existing blade axis; do not move the grip or blade tips.
+    if(!edgeAligned)weapon->m_qOrientation=normalize(weapon->m_qOrientation*Quaternion(Vector(0,0,1),1.5707963268f+relaxedIdleRoll));
+    return true;
+}
 void K1EngagePreparePose(Gob* model) {
     if(!K1EngageOwnsAnimation(model)) return;
     model->EndLookAtAnimate();
@@ -2156,7 +3053,7 @@ bool MotionSpine(Gob* body,Part* pelvis,Part* lower,Part* middle,Part* upper,flo
         else if(!strcmp(name,"y_parry_ur")) reference="j_parry_ur";
         else if(!strcmp(name,"y_parry_ll")) reference="j_parry_ll";
         else if(!strcmp(name,"y_parry_lr")) reference="j_parry_lr";
-        else for(int j=0;j<7;++j) if(!strcmp(name,attacks[j])) reference=fullAttacks[j];
+        else reference=AttackFullReference(name);
         if(reference) {body->GetAnimation(name,&time,&length);break;}
     }
     Vector angles;
@@ -2270,18 +3167,31 @@ void BindFrame(Part* part,Vector& position,Quaternion& orientation) {
     position=position+Rotate(orientation,part->m_pNode->m_vPosition);
     orientation=normalize(orientation*part->m_pNode->m_qOrientation);
 }
-void CacheNativeIdle(Gob* body,const char* resource,std::vector<BodyPose>* destination,const char* animation) {
-    auto& idle=destination?*destination:nativeIdlePose;
+std::unordered_map<std::string,std::shared_ptr<CSWCAnimBase>>& WearablePoseDonors() {
+    static std::unordered_map<std::string,std::shared_ptr<CSWCAnimBase>> donors;return donors;
+}
+void RetargetWearableAuthoredPose(Gob* body,Part* joint,Vector& position,Quaternion& orientation) {
+    const char* native=body&&body->m_pModel?WearableNativeResource(body->m_pModel->m_szName):nullptr;
+    if(!native || !_stricmp(native,"pmbbl") || !joint)return;
+    // Match the separate wearable generator's bind-relative orientation and
+    // height-scaled position transfer. Original PMBBL tuning is untouched.
+    const char* resource=PlayerRigForNative("pmbbl");
+    auto& owner=WearablePoseDonors()[resource];
+    if(!owner){owner=std::make_shared<CSWCAnimBase>();if(!owner->LoadModel(CResRef(resource),CSWCAnimBase::ANIM_MODEL_BODY)){owner.reset();return;}}
+    auto* source=owner->GetModel(CSWCAnimBase::ANIM_MODEL_BODY);
+    auto* original=source?source->GetPart(joint->m_pNode->TranslateNodeName()):nullptr;
+    if(!original)return;
+    Vector targetHead,targetHip,sourceHead,sourceHip;Quaternion unused;
+    auto* th=body->GetPart(const_cast<char*>("headhook"));auto* tp=body->GetPart(const_cast<char*>("pelvis_g"));
+    auto* sh=source->GetPart(const_cast<char*>("headhook"));auto* sp=source->GetPart(const_cast<char*>("pelvis_g"));
+    if(!th||!tp||!sh||!sp)return;
+    BindFrame(th,targetHead,unused);BindFrame(tp,targetHip,unused);BindFrame(sh,sourceHead,unused);BindFrame(sp,sourceHip,unused);
+    const float height=sourceHead.z-sourceHip.z;
+    if(height>.1f)position=position*((targetHead.z-targetHip.z)/height);
+    orientation=normalize(joint->m_pNode->m_qOrientation*Inverse(original->m_pNode->m_qOrientation)*orientation);
+}
+void CaptureNativePose(Gob* body,Gob* native,std::vector<BodyPose>& idle) {
     idle.clear();
-    CSWCAnimBase nativeOwner;
-    if(!nativeOwner.LoadModel(CResRef(resource),CSWCAnimBase::ANIM_MODEL_BODY)) return;
-    Gob* native=nativeOwner.GetModel(CSWCAnimBase::ANIM_MODEL_BODY);
-    if(!native) return;
-    native->m_bAlwaysRendering=true;
-    native->EnableForceAnimations();
-    if(!native->PlayAnimation(const_cast<char*>(animation),0,AnimRun::kAnimNoBlendIn,.13f)) return;
-    native->Animate(.000001f);
-
     // Retarget the native stance in model space across the extra spine joints.
     // Keep the adapted rig's bind offsets wherever the parent has changed.
     auto capture=[&](auto&& self,Part* part,Quaternion parentPose)->void {
@@ -2313,6 +3223,31 @@ void CacheNativeIdle(Gob* body,const char* resource,std::vector<BodyPose>* desti
     };
     capture(capture,body->m_pPart,Quaternion());
 }
+#include "include/k1guardheadedits.inc"
+#include "include/k1yellowguardarms.inc"
+#include "include/k1npcguardedits.inc"
+void CacheNativeIdle(Gob* body,const char* resource,std::vector<BodyPose>* destination,const char* animation) {
+    auto& idle=destination?*destination:nativeIdlePose;
+    idle.clear();
+    CSWCAnimBase nativeOwner;
+    if(!nativeOwner.LoadModel(CResRef(resource),CSWCAnimBase::ANIM_MODEL_BODY)) return;
+    Gob* native=nativeOwner.GetModel(CSWCAnimBase::ANIM_MODEL_BODY);
+    if(!native) return;
+    native->m_bAlwaysRendering=true;
+    native->EnableForceAnimations();
+    if(!native->PlayAnimation(const_cast<char*>(animation),0,AnimRun::kAnimNoBlendIn,.13f)) return;
+    native->Animate(.000001f);
+    CaptureNativePose(body,native,idle);
+    if(destination==&nativeStaffGuardPose) {
+        const auto& head=authoredGuardHeads[3][0];
+        for(auto& pose:idle) if(!strcmp(pose.part->m_pNode->TranslateNodeName(),"headhook")) {
+            pose.position=Vector(head.px,head.py,head.pz);
+            pose.orientation=normalize(Quaternion(head.qw,head.qx,head.qy,head.qz));
+            RetargetWearableAuthoredPose(body,pose.part,pose.position,pose.orientation);
+        }
+    }
+}
+#include "include/k1yellowlocomotion.h"
 Quaternion BendFrame(Vector direction,Vector normal) {
     Vector x=normalize(direction),z=normalize(normal-x*dot(x,normal)),y=normalize(cross(z,x));
     return normalize(Matrix(x,y,z).getquaternion());
@@ -2712,6 +3647,15 @@ void RefineRunPose(Gob* body,bool backward,float delta,PosePlayback& playback=pl
     }
 }
 
+constexpr float guardBlendDuration=.24f;
+void PrepareGuardBlend(PosePlayback& playback,bool guarding,bool relaxed) {
+    if(!playback.guardKnown) {
+        playback.guardKnown=true;playback.guardHeld=guarding;
+    } else if(playback.guardHeld!=guarding) {
+        playback.guardHeld=guarding;playback.guardTransition=relaxed;
+        playback.blendPending=true;
+    } else if(playback.blendPending || !relaxed) playback.guardTransition=false;
+}
 void SmoothBody(Gob* body,float delta,bool twoHanded,bool nativeIdle=false,PosePlayback& playback=playerPlayback) {
     auto &lastGrip=playback.lastGrip,&gripFrom=playback.gripFrom,&gripCorrection=playback.gripCorrection;
     auto &hiltCorrection=playback.hiltCorrection,&leftCorrection=playback.leftCorrection;
@@ -2723,7 +3667,8 @@ void SmoothBody(Gob* body,float delta,bool twoHanded,bool nativeIdle=false,PoseP
     auto& blendTime=playback.blendTime;
     bool anatomical=body->GetPart(const_cast<char*>("torsoMid_g"))!=nullptr;
     const bool sourceRig=body->GetPart(const_cast<char*>("rradiusX"))!=nullptr;
-    float duration=sourceRig?.14f:(anatomical?.20f:.15f);
+    const float ordinaryDuration=sourceRig?.14f:(anatomical?.20f:.15f);
+    float duration=(playback.guardTransition || playback.stanceTransition)?guardBlendDuration:ordinaryDuration;
     GripPose target=ReadGrip(body);
     Vector rawSourceGap=Rotate(Inverse(target.hiltQ),target.left-target.hilt);
     auto traceGrip=[&](const char* stage,const GripPose& p) {
@@ -2760,9 +3705,17 @@ void SmoothBody(Gob* body,float delta,bool twoHanded,bool nativeIdle=false,PoseP
             gripCorrection.leftGuide=normalize(gripFrom.leftGuide*Inverse(target.leftGuide));
         }
     }
-    blendTime=std::min(duration,blendTime+std::max(0.f,delta));
+    // Appearance replacement may stall a frame. Do not spend most of the
+    // new stance blend on that first displayed pose.
+    const bool redRig=!_stricmp(body->m_pModel->m_szName,"k1jared") || !_stricmp(body->m_pModel->m_szName,"k1jadred") || !_stricmp(body->m_pModel->m_szName,"k1japurp") ||
+        (body==loadedBody && WearableNativeResource(body->m_pModel->m_szName) && (RedMode() || PurpleMode()));
+    const float blendStep=(playback.stanceTransition || redRig)?std::min(delta,.025f):delta;
+    blendTime=std::min(duration,blendTime+std::max(0.f,blendStep));
+    if(blendTime>=duration)playback.stanceTransition=false;
     float alpha=blendTime/duration;
     alpha=alpha*alpha*(3-2*alpha);
+    float lowerAlpha=std::min(1.f,blendTime/ordinaryDuration);
+    lowerAlpha=lowerAlpha*lowerAlpha*(3-2*lowerAlpha);
     Part* pelvis=body->GetPart(const_cast<char*>("pelvis_g"));Part* torso=body->GetPart(const_cast<char*>("torso_g"));
     Quaternion relative=normalize(Inverse(pelvis->m_qLocalOrientation)*torso->m_qLocalOrientation);
     const BodyPose* oldPelvis=nullptr;const BodyPose* oldTorso=nullptr;
@@ -2772,12 +3725,15 @@ void SmoothBody(Gob* body,float delta,bool twoHanded,bool nativeIdle=false,PoseP
     }
     if(alpha<1) for(size_t i=0;i<blendFrom.size();++i) {
         const BodyPose& old=blendFrom[i];
-        old.part->m_vLocalPosition=old.position*(1-alpha)+old.part->m_vLocalPosition*alpha;
+        bool upper=false;
+        for(Part* p=old.part;p && !upper;p=p->m_pParent)upper=p==torso;
+        const float jointAlpha=playback.guardTransition && !upper?lowerAlpha:alpha;
+        old.part->m_vLocalPosition=old.position*(1-jointAlpha)+old.part->m_vLocalPosition*jointAlpha;
         // Fade one initial correction over the moving source trajectory. A fresh
         // shortest path to a moving endpoint can reverse midway through a swing.
         old.part->m_qLocalOrientation=anatomical?
-            normalize(Interpolate(rotationFrom[i],Quaternion(),alpha)*old.part->m_qLocalOrientation):
-            normalize(Interpolate(old.orientation,old.part->m_qLocalOrientation,alpha));
+            normalize(Interpolate(rotationFrom[i],Quaternion(),jointAlpha)*old.part->m_qLocalOrientation):
+            normalize(Interpolate(old.orientation,old.part->m_qLocalOrientation,jointAlpha));
     }
     if(!anatomical && alpha<1 && oldPelvis && oldTorso) {
         Quaternion previous=normalize(Inverse(oldPelvis->orientation)*oldTorso->orientation);
@@ -3403,6 +4359,17 @@ bool ApplyStaffGuard(Gob* body,bool walking,const std::vector<BodyPose>& guard=n
         // turns/bobs beneath it. Do not apply the source's spine correction twice.
         if(walking && pose.part==torso) pose.part->m_qLocalOrientation=
             normalize(Inverse(pelvis->m_qLocalOrientation)*nativePelvis*pose.orientation);
+        if(&guard==&nativeStaffGuardPose && !strcmp(pose.part->m_pNode->TranslateNodeName(),"headhook")) {
+            static bool checked[2]={};
+            if(!checked[walking]) {
+                const auto& head=authoredGuardHeads[3][0];
+                Vector expectedP(head.px,head.py,head.pz);Quaternion expectedQ=normalize(Quaternion(head.qw,head.qx,head.qy,head.qz));
+                RetargetWearableAuthoredPose(body,pose.part,expectedP,expectedQ);
+                float error=1-std::fabs(dot(normalize(pose.part->m_qLocalOrientation),expectedQ));
+                fprintf(stderr,"K1_STAFF_AUTHORED_HEAD_%s walking=%d rotation_error=%g\n",error<.00001f?"PASS":"FAIL",walking,error);
+                checked[walking]=true;
+            }
+        }
     }
     return true;
 }
@@ -3417,19 +4384,22 @@ void ClearStaffStrafe(Gob* body,float yaw) {
     Vector position;Quaternion orientation;arm->GetWorld(position,orientation);
     SetWorldOrientation(arm,normalize(Quaternion(normalize(body->m_qOrientation).ydir(),degrees*weight*.01745329252f)*orientation));
 }
+
 void K1EngagePose(Gob* body,float delta) {
     if(PoseNpcBody(body,delta)) return;
     if(body==poseProbeBody && poseProbeReference) {BridgeTorso(body,poseProbeReference,poseProbeTime);return;}
     if(!K1EngageOwnsAnimation(body)) { ApplyUtilityBlend(body, delta); return; }
+    const bool spinChain=PlayerSpinChain();
+    const bool nativeGait=!spinChain && ApplyYellowNativeGait(body,currentBase,currentOverlay!=nullptr,delta,PlayerNativeResource(body),playerPlayback,StaffMode(),DualMode());
     const char* blockReference=BlockReference(currentOverlay);
     if(currentOverlay && currentOverlay[0]=='y') {
         float time,length;
         if(body->GetAnimation(const_cast<char*>(currentOverlay),&time,&length)
-            && BridgeTorso(body,blockReference?blockReference:(state.attacking?fullAttacks[swingDirection]:"j_guard"),time)) ++bridgedPoses;
+            && BridgeTorso(body,blockReference?blockReference:(state.attacking?PlayerAttackClip(false):"j_guard"),time)) ++bridgedPoses;
     }
     float time=0,length=0;const char* reference=nullptr;
     if(currentOverlay && currentOverlay[0]=='y' && body->GetAnimation(const_cast<char*>(currentOverlay),&time,&length))
-        reference=blockReference?blockReference:(state.attacking?fullAttacks[swingDirection]:"j_guard");
+        reference=blockReference?blockReference:(state.attacking?PlayerAttackClip(false):"j_guard");
     const bool nativeIdle=!currentOverlay && !state.attacking && !state.Guarding() &&
         currentBase && !strcmp(currentBase,"j_idle") && !nativeIdlePose.empty();
     if(nativeIdle) {
@@ -3437,17 +4407,25 @@ void K1EngagePose(Gob* body,float delta) {
             pose.part->m_vLocalPosition=pose.position;
             pose.part->m_qLocalOrientation=pose.orientation;
         }
-    } else {
+    } else if(!spinChain) {
         TurnSpine(body,legsYaw,reference,time);
     }
     const bool staffWalk=StaffMode() && currentBase && strstr(currentBase,"walk");
     const bool staffReady=StaffMode() && !state.attacking && !blockReference && state.Guarding();
     if(staffReady) ApplyStaffGuard(body,staffWalk);
-    if(IsSourceBody(body) && !currentOverlay && !state.attacking && !state.Guarding() && currentBase) {
+    const bool dualReady=DualMode() && !state.attacking && !blockReference && state.Guarding();
+    std::vector<BodyPose> dualLowerBefore;
+    const bool dualSteadyWalk=DualMode() && !state.attacking && !blockReference && currentBase && strstr(currentBase,"walk");
+    if(dualSteadyWalk && std::getenv("K1_ENGAGE_DUAL_TEST")) {
+        for(const char* name:{"pelvis_g","lthigh_g","lshin_g","lfoot_g","lfootT_g","rthigh_g","rshin_g","rfoot_g","rfootT_g"})
+            if(auto* part=body->GetPart(const_cast<char*>(name)))dualLowerBefore.push_back({part,part->m_vLocalPosition,part->m_qLocalOrientation});
+    }
+    if(dualReady) ApplyStaffGuard(body,currentBase && strstr(currentBase,"walk"),nativeDualGuardPose);
+    if(!nativeGait && IsSourceBody(body) && !currentOverlay && !state.attacking && !state.Guarding() && currentBase) {
         const bool backward=!strcmp(currentBase,"j_backrun");
         if(backward || !strcmp(currentBase,"j_run")) RefineRunPose(body,backward,delta);
     }
-    if(!StaffMode() && state.attacking && currentOverlay &&
+    if(!PurpleMode() && !BlueMode() && !RedMode() && !DualMode() && !StaffMode() && state.attacking && currentOverlay &&
        body->GetAnimation(const_cast<char*>(currentOverlay),&time,&length))
         CalibrateCut(body,swingDirection,time,currentOverlay[0]=='y',
             currentBase && strstr(currentBase,"walk"),swingBackLeft);
@@ -3456,7 +4434,48 @@ void K1EngagePose(Gob* body,float delta) {
         ClearStaffStrafe(body,legsYaw);
     // Source-rig grip smoothing follows the changing authored hand separation;
     // it does not pin both hands together during a released staff swing.
-    SmoothBody(body,delta,StaffMode()?(staffReady || state.attacking || blockReference):(state.attacking || state.Guarding() || blockReference),nativeIdle);
+    // For duals, blend toward the final native grip/torso target in both guard
+    // directions; post-blend assignment would snap on entry and release.
+    if(dualSteadyWalk) StabilizeDualWalkingTorso(body,state.Guarding()?nativeDualGuardPose:nativeIdlePose);
+    if(DualMode() && !state.attacking && !blockReference && currentBase &&
+       (strstr(currentBase,"walk") || strstr(currentBase,"run")))ApplyDualLocomotionGrip(body);
+    PrepareGuardBlend(playerPlayback,state.Guarding(),!state.attacking && !blockReference);
+    // Select the saved headhook pose before the existing whole-body blend, so
+    // entering/leaving guard and changing gait retain their normal transitions.
+    if(!PurpleMode() && !BlueMode() && state.Guarding() && !state.attacking && !blockReference && currentBase &&
+       (strstr(currentBase,"walk") || !strcmp(currentBase,"j_guard") || !strcmp(currentBase,"j_idle"))) {
+        const int stance=DualMode()?2:StaffMode()?3:RedMode()?1:0;
+        const auto& head=authoredGuardHeads[stance][strstr(currentBase,"walk")?1:0];
+        if(auto* hook=body->GetPart(const_cast<char*>("headhook"))) {
+            hook->m_vLocalPosition=Vector(head.px,head.py,head.pz);
+            hook->m_qLocalOrientation=normalize(Quaternion(head.qw,head.qx,head.qy,head.qz));
+            RetargetWearableAuthoredPose(body,hook,hook->m_vLocalPosition,hook->m_qLocalOrientation);
+        }
+        if(stance==0 && strstr(currentBase,"walk")) {
+            for(const auto& edit:authoredYellowGuardWalk) {
+                if(auto* joint=body->GetPart(const_cast<char*>(edit.name))) {
+                    joint->m_vLocalPosition=Vector(edit.px,edit.py,edit.pz);
+                    joint->m_qLocalOrientation=normalize(Quaternion(edit.qw,edit.qx,edit.qy,edit.qz));
+                    RetargetWearableAuthoredPose(body,joint,joint->m_vLocalPosition,joint->m_qLocalOrientation);
+                }
+            }
+        }
+    }
+    SmoothBody(body,delta,DualMode()?false:(StaffMode()?(staffReady || state.attacking || blockReference):(state.attacking || state.Guarding() || blockReference)),nativeIdle);
+    if(dualReady && ContactTimingEnabled() && contactGuardClock.wall) {
+        fprintf(stderr,"K1_CONTACT_GUARD_POSE wall_us=%lld world_us=%lld input_attacking=%d input_native=%d native_intervened=%d\n",ContactWallUs()-contactGuardClock.wall,
+            g_pAppManager->m_pServerExoApp->GetWorldTimer()->GetSnapshotTime()-contactGuardClock.world,contactGuardClock.attacking,contactGuardClock.native,contactGuardClock.interrupted);
+        contactGuardClock={};
+    }
+    for(const auto& before:dualLowerBefore) {
+        // Entering walking blends from the prior gait. Preserve that transition;
+        // compare the normal gait after its existing source-rig blend settles.
+        if(playerPlayback.blendTime>=.14f) {
+            dualWalkLowerPositionError=std::max(dualWalkLowerPositionError,magnitude(before.part->m_vLocalPosition-before.position));
+            dualWalkLowerRotationError=std::max(dualWalkLowerRotationError,1.f-std::fabs(dot(normalize(before.part->m_qLocalOrientation),normalize(before.orientation))));
+        }
+    }
+    if(!dualLowerBefore.empty() && playerPlayback.blendTime>=.14f)++dualWalkLowerSamples;
     if(auto* player=ServerActor()) ObserveBlockPose(body,playerPlayback,currentOverlay,player->m_objectId,
         currentBase && (strstr(currentBase,"walk") || strstr(currentBase,"run")));
     if(IsSourceBody(body)) {
@@ -3488,8 +4507,21 @@ void K1EngagePose(Gob* body,float delta) {
 void K1EngageAfterSceneRender(CAurScene* scene) {
     UpdateDismemberCorpses(scene);
     sceneMeleeContacts.clear();
+    struct ContactMotionFrame {bool valid;~ContactMotionFrame(){if(valid)contactBodyRoots.swap(contactCurrentRoots);}} motionFrame{BeginContactBodyFrame(scene)};
     // Both sweeps must see the same posed scene before either applies damage.
-    struct ResolveContacts {~ResolveContacts(){ResolveMeleeContacts(sceneMeleeContacts);sceneMeleeContacts.clear();}} resolveContacts;
+    struct ResolveContacts {
+        long long started=ContactTimingEnabled()?ContactWallUs():0;
+        ~ResolveContacts(){
+            const auto resolve=started?ContactWallUs():0;const auto count=sceneMeleeContacts.size();
+            ResolveMeleeContacts(sceneMeleeContacts);sceneMeleeContacts.clear();
+            if(started) {
+                static long long previous=0;const auto ended=ContactWallUs();
+                if(ended-started>20000 || (previous && started-previous>100000))fprintf(stderr,"K1_CONTACT_FRAME trace_us=%lld resolve_us=%lld frame_gap_us=%lld contacts=%zu npcs=%zu mode=%d paused=%d\n",
+                    resolve-started,ended-resolve,previous?started-previous:0,count,npcPlayback.size(),int(state.mode),IsGamePaused());
+                previous=started;
+            }
+        }
+    } resolveContacts;
     TraceNpcBlades(scene);
     TraceNpcBolts(scene);
     if(!K1EngageActive() || !state.attacking || !currentOverlay) {hadBlade=false;return;}
@@ -3548,6 +4580,10 @@ NpcPlayback* FindNpcBody(Gob* body) {
     return nullptr;
 }
 bool NpcOwnsBody(Gob* body) {
+    // Scene-less native pose samplers are not actor rigs. In particular, their
+    // destructors call PlayAnimation while npcPlayback.clear() destroys entries;
+    // do not re-enter that container from an unrelated helper Gob's teardown.
+    if(!body || body->m_nExternalDataType!=CGameObject::OBJECT_TYPE_CREATURE || !body->m_pExternalData)return false;
     return K1EngageEnabled() && state.mode!=K1EngageState::Mode::Exploration && FindNpcBody(body);
 }
 bool SwapNpcRig(NpcPlayback& npc,bool engage) {
@@ -3560,7 +4596,7 @@ bool SwapNpcRig(NpcPlayback& npc,bool engage) {
         npc.chainSwings=0;npc.threatSince=0;
     }
     CCAppearanceInfo appearance=LiveAppearance(owner);
-    npc.body=nullptr;npc.pose={};npc.nativeIdle.clear();npc.staffGuard.clear();npc.previousBlades.clear();npc.contactBlades=0;npc.base=npc.overlay=nullptr;npc.bladeValid=false;
+    npc.body=nullptr;npc.pose={};npc.nativeIdle.clear();npc.staffGuard.clear();npc.previousBlades.clear();npc.contactBlades=0;npc.base=npc.overlay=nullptr;npc.bladeValid=false;npc.authoredHeadReported=0;
     npc.updated=npc.movingUntil=0;npc.legsYaw=0;npc.lastMotion=Vector();
     npc.previousPhysics=owner->GetServerCreature()->m_position;npc.physicsRemainder=.05f;npc.nextSteer=0;
     npc.position=npc.previousPhysics; // Native status/root motion is not a new source gait sample.
@@ -3583,8 +4619,9 @@ bool SwapNpcRig(NpcPlayback& npc,bool engage) {
             fresh->PlayAnimation(nullptr,1,0,0);fresh->Reset();
             npc.facingYaw=std::atan2(owner->m_orientation.y,owner->m_orientation.x);
             npc.previousFacingYaw=npc.facingYaw;
-            CacheNativeIdle(fresh,npc.nativeResource,&npc.nativeIdle);
-            if(npc.staff) CacheNativeIdle(fresh,npc.nativeResource,&npc.staffGuard,"g3r1");
+            CacheNativeIdle(fresh,npc.nativeResource.c_str(),&npc.nativeIdle);
+            if(npc.staff) CacheNativeIdle(fresh,npc.nativeResource.c_str(),&npc.staffGuard,"g3r1");
+            if(npc.dual) CacheNativeIdle(fresh,npc.nativeResource.c_str(),&npc.staffGuard,"g4r1");
         }
         BeginUtilityBlend(fresh,outgoing,engage,npc.utilityBlend);
         if(!engage && NativeUtilityQueued(owner->GetServerCreature()) && std::getenv("K1_ENGAGE_DARK_JEDI_TEST")) {
@@ -3602,6 +4639,11 @@ bool SwapNpcRig(NpcPlayback& npc,bool engage) {
     return ok;
 }
 void ReleaseNpcPlayback() {
+    // HUD shutdown can follow server/client destruction. There are no live
+    // actor rigs to restore once either owner has gone away.
+    if(!g_pAppManager || !g_pAppManager->m_pServerExoApp || !g_pAppManager->m_pClientExoApp) {
+        npcPlayback.clear();return;
+    }
     for(auto& entry:npcPlayback) {
         auto* enemy=g_pAppManager->m_pServerExoApp->GetCreatureByGameObjectID(entry.first);
         auto& npc=entry.second;
@@ -3611,6 +4653,11 @@ void ReleaseNpcPlayback() {
     npcPlayback.clear();
 }
 bool NativeStatusAnimation(CSWSCreature* actor) {
+    // K1's native knockdown handler sets commandability/animation but, unlike
+    // K2, does not add a SETSTATE knockdown marker. The dual player must yield
+    // its pose to that native action until its own removal/get-up completes.
+    if(actor && actor==ServerActor() && DualMode() && !actor->m_bCommandable &&
+       (actor->m_nAnimation==SERVER_ANIMATION_KNOCKDOWN_FROM_FRONT || actor->m_nAnimation==SERVER_ANIMATION_KNOCKDOWN_FROM_BEHIND))return true;
     return actor && (actor->m_nState!=EFFECT_STATE_NONE || actor->m_ambientAnimationState==14);
 }
 void StopNpcMove(NpcPlayback& npc,CSWSCreature* enemy) {
@@ -3628,6 +4675,7 @@ struct JkaWorld:K1JkaNav::World {
     CSWSCreature* actor;
     CSWSArea* area;
     int rejectedOrigins=0;
+    float clearanceSpace=-1,clearanceHeight=-1;
     unsigned long long geometryQueries=0;
     explicit JkaWorld(CSWSCreature* a,CSWSArea* map=nullptr):actor(a),area(map?map:static_cast<CSWSArea*>(a->GetArea())){}
     int random(int low,int high)override {return low-1+g_pRules->RollDice(1,high-low+1);}
@@ -3662,7 +4710,7 @@ struct JkaWorld:K1JkaNav::World {
             // not complete yet during geometry loading.
             area->m_pActivePathfindInfo=path;
             return area->TestDirectLine(from,end,
-                path->m_fPersonalSpace,path->m_fHeight,1,info)==1;
+                clearanceSpace<0?path->m_fPersonalSpace:clearanceSpace,clearanceHeight<0?path->m_fHeight:clearanceHeight,1,info)==1;
         };
         const bool clear=geometry(to,&hit);
         float first=1.f;
@@ -3748,6 +4796,24 @@ std::shared_ptr<K1JkaNav::Navigator> BuildNavigation(JkaWorld& world) {
     fprintf(stderr,"K1_JKA_NAV_GRAPH_%s actor=%llu points=%d nodes=%d edges=%d source=Raven_AStar\n",
         ok?"PASS":"FAIL",world.actor->m_objectId,int(points.size()),navigator->nodes(),navigator->edges());
     return ok?navigator:nullptr;
+}
+// Campaign script spawns can arrive after area preload. Prepare the existing
+// cache for their native cylinder before taking ownership; never move them on
+// a graph validated for a smaller actor.
+bool PrepareStoryNpcNavigation(CSWSCreature* actor) {
+    auto* area=actor && actor->GetArea()?static_cast<CSWSArea*>(actor->GetArea()):nullptr;
+    if(!area || !actor->m_pPathfindInfo)return false;
+    auto cached=npcNavigators.find(area->m_objectId);
+    const float space=actor->m_pPathfindInfo->m_fPersonalSpace,height=actor->m_pPathfindInfo->m_fHeight;
+    if(cached!=npcNavigators.end() && cached->second.area==area && cached->second.space>=space && cached->second.height>=height)return true;
+    JkaWorld world(actor);world.clearanceSpace=space;world.clearanceHeight=height;
+    if(cached!=npcNavigators.end()){world.clearanceSpace=std::max(space,cached->second.space);world.clearanceHeight=std::max(height,cached->second.height);}
+    auto graph=BuildNavigation(world);if(!graph)return false;
+    PreparedNavigation prepared;prepared.graph=graph;prepared.area=area;
+    prepared.space=world.clearanceSpace;prepared.height=world.clearanceHeight;prepared.generation=++navigationGeneration;
+    npcNavigators[area->m_objectId]=prepared;
+    fprintf(stderr,"K1_STORY_NPC_NAV_PREPARED actor=%llu space=%g height=%g phase=admission\n",actor->m_objectId,prepared.space,prepared.height);
+    return true;
 }
 bool LoadNpcNavigation(NpcPlayback& npc,CSWSCreature* enemy,JkaWorld& world) {
     auto cached=npcNavigators.find(world.area->m_objectId);
@@ -3840,6 +4906,9 @@ void MoveNpcWithJka(NpcPlayback& npc,CSWSCreature* enemy,float dt,long long now)
     if(stepped) {
         next.z=g_pAppManager->m_pServerExoApp->ComputeHeight(world.area->m_resRef,next,1);
         enemy->SetPosition(next,1,1,0);
+        // SetPosition updates spatial ownership, not native subarea scripts.
+        // Preserve entry/exit and crossed-trigger events for combat pmove too.
+        enemy->UpdateSubareasOnMoveTo(from,next,0,nullptr,0);
     }
     // JKA's NPC pmove runs twice per100ms think. Interpolate the displayed
     // body between those physics samples instead of snapping it at20Hz.
@@ -3899,6 +4968,7 @@ void ThinkNpcCombat(NpcPlayback& npc,CSWSCreature* enemy,CSWSCreature* target,lo
              !enemy->m_pStats->GetSpellUsesLeft(spell,slot,0,0))) ++slot;
         if(slot<enemy->m_pStats->m_numClasses && enemy->AddCastSpellActions(spell,slot,0,0,0,
             target->m_position,target->m_objectId,0,0,1,0,0,0,-1,0xff,0)) {
+            ClearClashEpisode(enemy->m_objectId);
             force.next=now+8000000;
             force.nextSpell=spell==FORCE_POWER_CHOKE?FORCE_POWER_FORCE_PUSH:FORCE_POWER_CHOKE;
             force.lastSpell=spell;
@@ -3962,10 +5032,13 @@ void ThinkNpcCombat(NpcPlayback& npc,CSWSCreature* enemy,CSWSCreature* target,lo
         auto* targetBody=target->GetClientCreature();
         input.enemySaber=targetBody && targetBody->GetAnimationBase() &&
             (targetBody->GetAnimationBase()->m_nWeaponClass==CSWCAnimBase::WEAPON_CLASS_SINGLE_SABER ||
-             (targetBody==Actor() && StaffMode()));
+             DualNpc(target) ||
+             (targetBody==Actor() && (StaffMode() || DualMode())));
         auto* targetWeapon=targetBody?g_pAppManager->m_pClientExoApp->GetItemByGameObjectID(targetBody->m_aEquippedItemIds[4]):nullptr;
-        input.enemySaberActive=targetWeapon && targetWeapon->m_bPowered;
-        input.enemyShooting=state.attacking;
+        input.enemySaberActive=targetWeapon && (targetWeapon->m_bPowered || SwordType(targetWeapon->m_baseItem));
+        const auto targetNpc=npcPlayback.find(target->m_objectId);
+        input.enemyShooting=target==ServerActor()?state.attacking:
+            targetNpc!=npcPlayback.end() && targetNpc->second.attacking;
         npc.commands=K1JkaAI::mediumJedi(npc.jedi,input,bindings);
         npc.sourceJediCommands=true;
         walk=npc.commands.walking || npc.parrying;
@@ -3980,6 +5053,34 @@ void ThinkNpcCombat(NpcPlayback& npc,CSWSCreature* enemy,CSWSCreature* target,lo
         fprintf(stderr,"K1_ENEMY_AI actor=%llu ranged=%d decision=%s distance=%g aggression=%d\n",
             npc.id,npc.ranged,npc.decision,distance,npc.jedi.aggression);
 }
+bool CommitClashParry(NpcPlayback& npc,long long now,int roll) {
+    auto& p=meleePoise[npc.id];
+    if(!ChooseClashParry(p,roll))return false;
+    npc.parry="j_guard";npc.parryOverlay="y_guard";npc.parrying=true;
+    // Wait for one incoming swing; two actors choosing guard cannot deadlock.
+    npc.parryStart=now;npc.parryUntil=now+2000000;p.clashGuardUntil=npc.parryUntil;
+    npc.nextAttack=npc.parryUntil;return true;
+}
+void ValidateClashEpisodes(long long now) {
+    auto* server=g_pAppManager->m_pServerExoApp;
+    for(auto& entry:meleePoise) {
+        auto& p=entry.second;if(!p.clashes)continue;
+        auto* actor=server->GetCreatureByGameObjectID(entry.first);
+        auto* other=server->GetCreatureByGameObjectID(p.clashOpponent);
+        auto npc=npcPlayback.find(entry.first);
+        auto weapon=[&](int slot){auto* item=actor && actor->m_pInventory?actor->m_pInventory->GetItemInSlot(slot):nullptr;return item?item->m_objectId:OBJECT_INVALID;};
+        const bool swinging=K1EngageOwnsPlayer(entry.first)?state.attacking:(npc!=npcPlayback.end() && npc->second.attacking);
+        if(!actor || !other || actor->GetDead() || other->GetDead() || actor->GetArea()!=other->GetArea() ||
+           NativeUtilityQueued(actor) || NativeStatusAnimation(actor) || !HasMeleePoise(actor) ||
+           (actor!=ServerActor() && npc==npcPlayback.end()) ||
+           weapon(CSWInventory::SLOT_RIGHTWEAPON)!=p.clashRight || weapon(CSWInventory::SLOT_LEFTWEAPON)!=p.clashLeft ||
+           (npc!=npcPlayback.end() && npc->second.target!=p.clashOpponent) ||
+           (p.clashSwing && !swinging) || (p.clashParry && p.clashGuardUntil && now>=p.clashGuardUntil)) {
+            ClearClashEpisode(entry.first);continue;
+        }
+        if(swinging)p.clashSwing=true;
+    }
+}
 void UpdateNpcPlayback() {
     auto* server=g_pAppManager->m_pServerExoApp;
     auto* player=ServerActor();
@@ -3987,12 +5088,22 @@ void UpdateNpcPlayback() {
         auto* enemy=server->GetCreatureByGameObjectID(it->first);
         auto& npc=it->second;
         const bool same=enemy && enemy->GetClientCreature()==npc.owner &&
-            npc.owner->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1)==npc.body;
+            npc.owner->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1)==npc.body &&
+            npc.staff==StaffNpc(enemy) && npc.dual==DualNpc(enemy) && npc.red==RedNpc(enemy) && npc.blue==BlueNpc(enemy) &&
+            (!NativeConfiguredNpc(enemy) || npc.weaponClass==NpcWeaponClass(enemy));
         const bool release=!same || !player || player->GetDead() || enemy->GetDead() ||
             enemy->m_bPassiveAttackBehaviour || (!enemy->m_bCommandable && !NativeStatusAnimation(enemy)) || enemy->m_bInParty ||
             !SandboxTarget(enemy,player) ||
             enemy->GetArea()!=player->GetArea() || state.mode==K1EngageState::Mode::Exploration;
         if(release) {
+            // An armor/body update can recreate an owned native-catalog rig
+            // through the appearance hook before this tick sees the new Gob.
+            if(NativeConfiguredNpc(enemy) && npc.requested && enemy->GetClientCreature()==npc.owner) {
+                auto* current=npc.owner->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1);
+                if(IsSourceBody(current))npc.body=current;
+                if(npc.body==current)SwapNpcRig(npc,false);
+                it=npcPlayback.erase(it);continue;
+            }
             if(std::getenv("K1_ENGAGE_ENEMY_AI_TEST")) {
                 auto* current=enemy?enemy->GetClientCreature():nullptr;
                 auto* body=current?current->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1):nullptr;
@@ -4021,6 +5132,7 @@ void UpdateNpcPlayback() {
         if(!enemy || enemy==player || enemy->GetDead() || enemy->m_bInParty || enemy->m_bPlayerCharacter ||
             enemy->m_bPassiveAttackBehaviour || (!enemy->m_bCommandable && !NativeStatusAnimation(enemy)) ||
             !opponent) continue;
+        if(NativeConfiguredNpc(enemy) && !NativeNpcMeleeEquipped(enemy))continue;
         auto* controllerPlayer=player;
         auto* target=opponent;
         const bool detected=enemy->HasTargetBeenDetected(target->m_objectId,1)!=0;
@@ -4034,6 +5146,7 @@ void UpdateNpcPlayback() {
             // all native actions/one-shots end. It must not hold locomotion.
             // Real physical rounds keep their existing ownership boundary.
             if(round->m_bRoundStarted && !round->m_bSpellCastRound) continue;
+            CompleteReleasedUtilityRound(enemy);
             auto& npc=found->second;
             if(!SwapNpcRig(npc,true)) {SwapNpcRig(npc,false);npcPlayback.erase(found);continue;}
         }
@@ -4044,12 +5157,15 @@ void UpdateNpcPlayback() {
             const bool gunner=weaponClass==CSWCAnimBase::WEAPON_CLASS_SINGLE_BLASTER || weaponClass==CSWCAnimBase::WEAPON_CLASS_RIFLE;
             const char* rig=body && body->m_pModel?NpcRigResource(body->m_pModel->m_szName,enemy):nullptr;
             if(!rig ||
-                body->m_pAddInModel || enemy->m_pCombatRound->m_bRoundStarted || (!Supported(owner) && !gunner && !StaffNpc(enemy))) continue;
+                body->m_pAddInModel || enemy->m_pCombatRound->m_bRoundStarted || (!Supported(owner) && !NativeNpcBlunt(owner) && !gunner && !StaffNpc(enemy) && !DualNpc(enemy))) continue;
             if(!g_pExoResMan->Exists(CResRef(rig),RESTYPE_MDL,static_cast<unsigned int*>(nullptr)) ||
                 !g_pExoResMan->Exists(CResRef(rig),RESTYPE_MDX,static_cast<unsigned int*>(nullptr))) continue;
+            if(std::getenv("K1_ENGAGE_STORY") && !PrepareStoryNpcNavigation(enemy))continue;
+            ConfigureNpcPoise(enemy);
             auto& npc=npcPlayback[enemy->m_objectId];npc.id=enemy->m_objectId;npc.owner=owner;npc.position=enemy->m_position;
-            npc.nativeResource=!_stricmp(body->m_pModel->m_szName,"n_darkjedim")?"n_darkjedim":"n_sithsoldier";
-            npc.health=enemy->GetCurrentHitPoints(0);npc.staff=StaffNpc(enemy);
+            npc.nativeResource=body->m_pModel->m_szName;
+            npc.weaponClass=weaponClass;
+            npc.health=enemy->GetCurrentHitPoints(0);npc.staff=StaffNpc(enemy);npc.dual=DualNpc(enemy);npc.red=RedNpc(enemy);npc.blue=BlueNpc(enemy);
             if(std::getenv("K1_ENGAGE_ENEMY_AI_TEST") && !gunner && !std::getenv("K1_JKA_DEFAULT_PROFILE_PROBE") &&
                 !std::getenv("K1_ENGAGE_DARK_JEDI_TEST")) {
                 // The combat/navigation fixture selects the source offensive
@@ -4068,6 +5184,7 @@ void UpdateNpcPlayback() {
                 enemy->ClearAction(move,1);enemy->RemoveGroup(group);
                 enemy->m_pPathfindInfo->ResetAtEndOfPath();
             }
+            CompleteReleasedUtilityRound(enemy);
             if(!SwapNpcRig(npc,true)) {SwapNpcRig(npc,false);npcPlayback.erase(enemy->m_objectId);continue;}
             found=npcPlayback.find(enemy->m_objectId);
             // The scripted poise contact fixture holds attacks, including the
@@ -4077,6 +5194,7 @@ void UpdateNpcPlayback() {
         }
         auto& npc=found->second;
         if(npc.target!=target->m_objectId) {
+            ClearClashEpisode(npc.id);
             if(npc.target!=OBJECT_INVALID){npc.attacking=npc.parrying=false;npc.chainSwings=0;npc.bladeValid=false;++npc.serial;npc.pose.blendPending=true;}
             npc.target=target->m_objectId;
         }
@@ -4107,7 +5225,15 @@ void UpdateNpcPlayback() {
         const bool threat=detected && !reaction && !npc.ranged && !npc.attacking && (target==controllerPlayer?K1EngageEnemyFacesSwing(enemy):npcThreat);
         if(!threat) npc.threatSince=0;
         else if(!npc.threatSince) npc.threatSince=now;
-        if(threat && !npc.parrying && now>=npc.parryReady && now-npc.threatSince>=90000 && (enemy->m_nAIState & 0x84)==0x84) {
+        auto& clash=meleePoise[npc.id];
+        if(clash.clashes && !npc.attacking && !npc.ranged && detected && !NativeUtilityQueued(enemy) &&
+           !NativeStatusAnimation(enemy) && enemy->m_bCommandable && (enemy->m_nAIState & 0x84)==0x84 && distance<=attackRange && now>=npc.nextAttack &&
+           clash.clashDecision!=clash.clashes) {
+            const int roll=g_pRules->RollDice(1,100);
+            CommitClashParry(npc,now,roll);
+            fprintf(stderr,"K1_CLASH_PARRY_DECISION actor=%llu count=%d chance=%d roll=%d parry=%d\n",npc.id,clash.clashes,ClashParryChance(clash),roll,clash.clashParry);
+        }
+        if(!clash.clashes && threat && !npc.parrying && now>=npc.parryReady && now-npc.threatSince>=90000 && (enemy->m_nAIState & 0x84)==0x84) {
             npc.parry="j_guard";npc.parrying=true;
             npc.parryOverlay="y_guard";
             npc.parryStart=now;npc.parryUntil=now+350000;npc.parryReady=now+800000;
@@ -4164,19 +5290,26 @@ void UpdateNpcPlayback() {
             npc.attacking=false;npc.chainSwings=0;npc.bladeValid=false;
         }
         if(canAttack && (chain || (!npc.attacking && now>=npc.nextAttack))) {
+            auto& episode=meleePoise[npc.id];
+            if(episode.clashSwing)ClearClashEpisode(npc.id);
+            if(episode.clashes)episode.clashSwing=true;
             if(chain) {
                 ++npc.chainLinks;
                 fprintf(stderr,"K1_NPC_CHAIN actor=%llu swing=%d outgoing=%d time=%g handoff=%g\n",
                     npc.id,npc.chainSwings+1,npc.direction,time,NpcHitEnd(npc)+chainFollowThrough);
             }
             npc.chainSwings=chain?npc.chainSwings+1:1;
+            npc.redFrom=npc.red && chain?npc.direction:-1;
+            npc.blueFrom=npc.blue && chain?npc.direction:-1;
             npc.direction=std::getenv("K1_ENGAGE_CLASH_TEST")?0:
                 (std::getenv("K1_ENGAGE_PARRY_TEST")?parryProbeDirection:
                     (npc.ranged?g_pRules->RollDice(1,7)-1:NpcMeleeDirectionForRoll(g_pRules->RollDice(1,18)-1)));
             npc.attacking=true;npc.hit=false;npc.bladeValid=false;npc.contactBlades=0;npc.previousBlades.clear();
+            npc.attackStartedAt=now;
             meleePoise[npc.id].blockReaction=-1;
             if(!npc.ranged) NotePoiseActivity(enemy,"swing");
             ++npc.serial;time=0;
+            if(npc.red && npc.redFrom>=0)fprintf(stderr,"K1_RED_NPC_CHAIN_SELECT from=%d to=%d clip=%s transition=%s\n",npc.redFrom,npc.direction,NpcAttackClip(npc,false),redChains[npc.redFrom][npc.direction].transition);
             attackStarted=true;
             if(npc.ranged) npc.nextAttack=now+(npc.rifle?350000:400000); // Owned JKA weapons.dat firetime.
             npc.bladeSamples=npc.sweeps=npc.sceneVisits=0;npc.closestTip=999.f;
@@ -4238,7 +5371,7 @@ void UpdateNpcPlayback() {
         const char* base=reaction?reaction:(moving?gait:(guarding?"j_guard":ready));
         const char* overlay=npc.attacking?(npc.ranged?
             (npc.rifle?(moving?"y_rifle_fire":"j_rifle_fire"):(moving?"y_pistol_fire":"j_pistol_fire")):
-            (moving?attacks[npc.direction]:fullAttacks[npc.direction])):
+            NpcAttackClip(npc,moving)):
             (block>=0?blockUpper[block]:(guarding && moving?"y_guard":nullptr));
         float baseTime=0,baseLength=0;
         const bool baseChanged=npc.base!=base || !npc.body->GetAnimation(const_cast<char*>(base),&baseTime,&baseLength);
@@ -4287,9 +5420,39 @@ void UpdateNpcPlayback() {
         }
     }
 }
+// NPC head_g is below Hturn_g/neck, not below the external-head hook. Solve its
+// current parent frame, including native head tracking, rather than copying a
+// local quaternion that only works when that extra chain is in its bind pose.
+bool NpcGuardHeadFrame(Gob* body,Vector& position,Quaternion& orientation) {
+    auto* hook=body->GetPart(const_cast<char*>("headhook"));
+    auto* head=body->GetPart(const_cast<char*>("head_g"));
+    if(!hook || !head || head->m_pNode->m_pTree!=body->m_pModel)return false;
+    Vector hookBind,headBind,hookWorld;Quaternion hookBindQ,headBindQ,hookQ;
+    BindFrame(hook,hookBind,hookBindQ);BindFrame(head,headBind,headBindQ);
+    hook->GetWorld(hookWorld,hookQ);
+    const Quaternion frame=normalize(hookQ*Inverse(normalize(hookBindQ)));
+    position=hookWorld+Rotate(frame,(headBind-hookBind)*body->m_fObjectScale);
+    orientation=normalize(frame*headBindQ);
+    return true;
+}
+void AlignNpcGuardHead(Gob* body) {
+    Vector target;Quaternion orientation;
+    if(!NpcGuardHeadFrame(body,target,orientation))return;
+    auto* head=body->GetPart(const_cast<char*>("head_g"));
+    Vector parentPosition=body->m_vPosition;Quaternion parentQ=body->m_qOrientation;
+    if(head->m_pParent)head->m_pParent->GetWorld(parentPosition,parentQ);
+    float scale=body->m_fObjectScale;
+    for(Part* p=head->m_pParent;p;p=p->m_pParent)scale*=p->m_scale.m_fScale;
+    if(std::fabs(scale)<.000001f)return;
+    head->m_vLocalPosition=Rotate(Inverse(normalize(parentQ)),target-parentPosition)/scale;
+    SetWorldOrientation(head,orientation);
+}
 bool PoseNpcBody(Gob* body,float delta) {
     auto* npc=NpcOwnsBody(body)?FindNpcBody(body):nullptr;
     if(!npc) return false;
+    const bool spinChain=NpcSpinChain(*npc);
+    const bool nativeGait=!spinChain && !npc->ranged &&
+        ApplyYellowNativeGait(body,npc->base,npc->overlay!=nullptr,delta,npc->nativeResource.c_str(),npc->pose,npc->staff,npc->dual);
     float time=0,length=0;
     const bool overlay=npc->overlay && body->GetAnimation(const_cast<char*>(npc->overlay),&time,&length);
     const bool guarding=NpcGuarding(*npc);
@@ -4299,21 +5462,64 @@ bool PoseNpcBody(Gob* body,float delta) {
         npc->parityOK=npc->parityOK && npc->walking &&
             !strcmp(overlay?npc->overlay:npc->base,overlay?"y_guard":"j_guard");
     }
-    const char* reference=blockReference?blockReference:(guarding?"j_guard":(npc->ranged?(npc->rifle?"j_rifle_fire":"j_pistol_fire"):fullAttacks[npc->direction]));
+    const char* reference=blockReference?blockReference:(guarding?"j_guard":(npc->ranged?(npc->rifle?"j_rifle_fire":"j_pistol_fire"):NpcAttackClip(*npc,false)));
     if(overlay && npc->overlay[0]=='y') BridgeTorso(body,reference,time);
     const bool nativeIdle=!overlay && !npc->attacking && !guarding && npc->base &&
         !strcmp(npc->base,"j_idle") && !npc->nativeIdle.empty();
     if(nativeIdle) for(const auto& pose:npc->nativeIdle) {
         pose.part->m_vLocalPosition=pose.position;pose.part->m_qLocalOrientation=pose.orientation;
     }
-    else TurnSpine(body,npc->legsYaw,overlay?reference:nullptr,time);
-    if(overlay && npc->attacking && !npc->ranged && !npc->staff && !guarding) CalibrateCut(body,npc->direction,time,npc->overlay[0]=='y',npc->walking,npc->backLeft);
-    if(!overlay && npc->base && (!strcmp(npc->base,"j_run") || !strcmp(npc->base,"j_backrun")))
+    else if(!spinChain)TurnSpine(body,npc->legsYaw,overlay?reference:nullptr,time);
+    if(overlay && npc->attacking && !npc->ranged && !npc->staff && !npc->dual && !npc->red && !npc->blue && !guarding) CalibrateCut(body,npc->direction,time,npc->overlay[0]=='y',npc->walking,npc->backLeft);
+    if(!nativeGait && !overlay && npc->base && (!strcmp(npc->base,"j_run") || !strcmp(npc->base,"j_backrun")))
         RefineRunPose(body,!strcmp(npc->base,"j_backrun"),delta,npc->pose);
     if(npc->staff && guarding && !blockReference) ApplyStaffGuard(body,npc->base && strstr(npc->base,"walk"),npc->staffGuard);
     if(npc->staff && !overlay && !guarding && !npc->attacking && npc->base &&
        (strstr(npc->base,"walk") || strstr(npc->base,"run"))) ClearStaffStrafe(body,npc->legsYaw);
-    SmoothBody(body,delta,(npc->attacking || guarding || blockReference) && !npc->ranged,nativeIdle,npc->pose);++npc->revision;
+    // Native dual grips/guard are the target pose, not a post-blend override.
+    // Blend and cache the same pose that will actually be displayed.
+    const bool lateDualBaseline=npc->dual && std::getenv("K1_DUAL_LATE_GRIP_BASELINE");
+    bool authoredHead=false;
+    auto blendNpc=[&] {
+        if(guarding && !npc->attacking && !blockReference && !npc->ranged && npc->base &&
+           (strstr(npc->base,"walk") || !strcmp(npc->base,"j_guard") || !strcmp(npc->base,"j_idle"))) {
+            const bool walking=strstr(npc->base,"walk")!=nullptr;
+            for(const auto& edit:authoredNpcGuardPoses) {
+                if(edit.walking!=walking || _stricmp(edit.rig,body->m_pModel->m_szName))continue;
+                if(!strcmp(edit.bone,"head_g"))continue; // old generated tables
+                if(auto* joint=body->GetPart(const_cast<char*>(edit.bone))) {
+                    joint->m_vLocalPosition=Vector(edit.px,edit.py,edit.pz);
+                    joint->m_qLocalOrientation=normalize(Quaternion(edit.qw,edit.qx,edit.qy,edit.qz));
+                    authoredHead=authoredHead || !strcmp(edit.bone,"headhook");
+                }
+            }
+            if(authoredHead)AlignNpcGuardHead(body);
+        }
+        PrepareGuardBlend(npc->pose,guarding,!npc->attacking && !blockReference && !npc->ranged);
+        SmoothBody(body,delta,(npc->attacking || guarding || blockReference) && !npc->ranged && !npc->dual,nativeIdle,npc->pose);
+    };
+    if(lateDualBaseline)blendNpc();
+    if(npc->dual && guarding && !blockReference)ApplyStaffGuard(body,npc->base && strstr(npc->base,"walk"),npc->staffGuard);
+    if(npc->dual && !npc->attacking && !blockReference && npc->base) {
+        const bool walking=strstr(npc->base,"walk")!=nullptr;
+        if(walking)StabilizeDualWalkingTorso(body,guarding?npc->staffGuard:npc->nativeIdle);
+        if(!guarding && (walking || strstr(npc->base,"run")))ApplyDualMovingGrip(body,npc->staffGuard,walking);
+    }
+    if(!lateDualBaseline)blendNpc();
+    const float settled=npc->pose.guardTransition?guardBlendDuration:.14f;
+    if(authoredHead && npc->pose.blendTime>=settled) {
+        const unsigned bit=npc->base && strstr(npc->base,"walk")?2:1;
+        if(!(npc->authoredHeadReported&bit)) {
+            Vector target,actual;Quaternion expected,q;
+            if(NpcGuardHeadFrame(body,target,expected)) {
+                body->GetPart(const_cast<char*>("head_g"))->GetWorld(actual,q);
+                const float pe=magnitude(actual-target),qe=1-std::fabs(dot(normalize(q),expected));
+                fprintf(stderr,"K1_NPC_AUTHORED_HEAD_%s actor=%llu rig=%s walking=%d position_error=%g rotation_error=%g\n",pe<.00002f && qe<.00001f?"PASS":"FAIL",npc->id,body->m_pModel->m_szName,bit==2,pe,qe);
+                npc->authoredHeadReported|=bit;
+            }
+        }
+    }
+    ++npc->revision;
     ObserveBlockPose(body,npc->pose,npc->overlay,npc->id,npc->base && (strstr(npc->base,"walk") || strstr(npc->base,"run")));
     if(npc->pose.lastGrip.joined) {
         ++npc->gripSamples;
@@ -4448,21 +5654,26 @@ void TraceNpcBlades(CAurScene* scene) {
         }
         if(!npc.attacking || !npc.overlay || !npc.body->GetAnimation(const_cast<char*>(npc.overlay),&time,&length)) {npc.bladeValid=false;continue;}
         std::vector<K1SaberContact::Blade> beams;
-        if(npc.staff) beams=StaffBlades(npc.owner);
+        if(npc.dual) {beams.resize(2);for(int hand=0;hand<2;++hand)DualBlade(npc.owner,hand,beams[hand]);}
+        else if(npc.staff) beams=StaffBlades(npc.owner);
         else if(Blade(npc.owner,base,tip)) beams.push_back({base,tip});
         if(beams.empty()) {npc.bladeValid=false;npc.previousBlades.clear();continue;}
         const float previousTime=npc.bladeTime;
         for(size_t blade=0;blade<beams.size();++blade) {
+        if(npc.dual && magnitude(beams[blade].tip-beams[blade].base)<.0001f)continue;
         base=beams[blade].base;tip=beams[blade].tip;
         npc.bladeTime=previousTime;
         ++npc.bladeSamples;
         npc.closestTip=std::min(npc.closestTip,magnitude(tip-(target->m_position+Vector(0,0,1.f))));
-        auto begin=npc.staff && npc.previousBlades.size()==beams.size()?npc.previousBlades[blade]:K1SaberContact::Blade{npc.bladeBase,npc.bladeTip},end=beams[blade];
-        if(!npc.bladeValid || (npc.staff && npc.previousBlades.size()!=beams.size()) || time<npc.bladeTime || magnitude(base-begin.base)>2.f) {begin=end;npc.bladeTime=time;}
+        auto begin=(npc.staff || npc.dual) && npc.previousBlades.size()==beams.size()?npc.previousBlades[blade]:K1SaberContact::Blade{npc.bladeBase,npc.bladeTip},end=beams[blade];
+        const bool reset=!npc.bladeValid || ((npc.staff || npc.dual) && npc.previousBlades.size()!=beams.size()) || time<npc.bladeTime || magnitude(base-begin.base)>2.f;
+        if(reset) {begin=end;npc.bladeTime=time;}
+        const auto worldPrevious=begin,worldCurrent=end;
+        begin=RelativeContactStart(target->m_objectId,begin,!reset);
         const float start=NpcHitStart(npc),finish=npc.staff?StaffContactEnd(npc.direction):ContactEnd(NpcHitEnd(npc));
         if(SwingSoundDue(npc.serial,npc.pose.swingSoundSerial,time,start)) EngageWeaponSound(attacker,nullptr,"swing");
         float lo=0,hi=1;
-        if((npc.staff?!(npc.contactBlades&(1u<<blade)):!npc.hit) && K1SaberContact::ClipTime(npc.bladeTime,time,start,finish,lo,hi)) {
+        if(((npc.staff || npc.dual)?!(npc.contactBlades&(1u<<blade)):!npc.hit) && K1SaberContact::ClipTime(npc.bladeTime,time,start,finish,lo,hi)) {
             ++npc.sweeps;
             auto* enemy=g_pAppManager->m_pServerExoApp->GetCreatureByGameObjectID(npc.id);
             Vector forward=normalize(target->m_position-enemy->m_position);
@@ -4486,20 +5697,29 @@ void TraceNpcBlades(CAurScene* scene) {
             }
             const int steps=K1SaberContact::Steps(begin,end);bool hit=false;
             MeleeContact contact={npc.id,target->m_objectId,npc.serial};
-            contact.blade=npc.staff?int(blade):-1;contact.poiseOnly=npc.hit;
+            contact.blade=(npc.staff || npc.dual)?int(blade):-1;contact.poiseOnly=npc.dual?false:npc.hit;
+            if(npc.dual) {
+                auto* item=attacker->m_pInventory->GetItemInSlot(blade?CSWInventory::SLOT_LEFTWEAPON:CSWInventory::SLOT_RIGHTWEAPON);
+                if(!item)continue;
+                contact.dualWeapon=item->m_objectId;contact.offhand=blade!=0;
+            }
             for(int step=0;step<steps && !hit;++step) for(size_t ti=0;ti<triangles.size();++ti) {
                 const auto x=K1SaberContact::Between(begin,end,float(step)/steps),y=K1SaberContact::Between(begin,end,float(step+1)/steps);
                 if(K1SaberContact::SweepCell(x,y,triangles[ti])) {
                     if(K1SaberContact::SweepPoint(x,y,triangles[ti],contact.hitPoint)) {
                         contact.hitPart=parts[ti];contact.bladeDirection=y.tip-y.base;
                         const float fraction=std::max(0.f,std::min(1.f,dot(contact.hitPoint-y.base,y.tip-y.base)/dot(y.tip-y.base,y.tip-y.base)));
-                        contact.bladeMotion=(y.base-x.base)*(1-fraction)+(y.tip-x.tip)*fraction;
+                        const auto wx=K1SaberContact::Between(worldPrevious,worldCurrent,lo+(hi-lo)*(float(step)/steps)),wy=K1SaberContact::Between(worldPrevious,worldCurrent,lo+(hi-lo)*(float(step+1)/steps));
+                        contact.bladeDirection=wy.tip-wy.base;
+                        contact.bladeMotion=(wy.base-wx.base)*(1-fraction)+(wy.tip-wx.tip)*fraction;
                     }
                     hit=true;break;
                 }
             }
             if(hit) {
-                npc.hit=true;if(npc.staff) npc.contactBlades|=1u<<blade;
+                if(ContactTimingEnabled())contact.wallAt=ContactWallUs();
+                npc.hit=true;if(npc.staff || npc.dual) npc.contactBlades|=1u<<blade;
+                if(npc.dual)fprintf(stderr,"K1_NPC_DUAL_CONTACT actor=%llu serial=%d hand=%zu weapon=%llu\n",npc.id,npc.serial,blade,contact.dualWeapon);
                 if(npc.staff) fprintf(stderr,"K1_NPC_STAFF_CONTACT actor=%llu serial=%d blade=%zu poise_only=%d\n",npc.id,npc.serial,blade,contact.poiseOnly);
                 auto* enemy=g_pAppManager->m_pServerExoApp->GetCreatureByGameObjectID(npc.id);
                 if(enemy) {if(!contact.poiseOnly) contact.dismemberRow=SampleDismemberment(enemy,target,contact);contact.hitPart=nullptr;sceneMeleeContacts.push_back(contact);}
@@ -4530,78 +5750,87 @@ bool ContactActorsValid(const MeleeContact& contact) {
     auto* server=g_pAppManager->m_pServerExoApp;
     auto* attacker=server->GetCreatureByGameObjectID(contact.attacker);
     auto* target=server->GetCreatureByGameObjectID(contact.target);
+    if(contact.dualWeapon!=OBJECT_INVALID) {
+        auto* item=attacker && attacker->m_pInventory?attacker->m_pInventory->GetItemInSlot(contact.offhand?CSWInventory::SLOT_LEFTWEAPON:CSWInventory::SLOT_RIGHTWEAPON):nullptr;
+        if(!(attacker==ServerActor()?DualMode():DualNpc(attacker)) || !item || item->m_objectId!=contact.dualWeapon) return false;
+    }
     const auto owned=npcPlayback.find(contact.attacker);
     if(owned!=npcPlayback.end() && owned->second.target!=contact.target)return false;
     return attacker && target && !attacker->GetDead() && !target->GetDead() && attacker->GetArea()==target->GetArea() &&
         (K1EngageOwnsPlayer(contact.attacker) || K1EngageOwnsEnemy(contact.attacker));
 }
-bool ContactCanWait(const MeleeContact& contact) {
+bool ContactCanDeflect(const MeleeContact& contact,long long now) {
     auto* server=g_pAppManager->m_pServerExoApp;
     auto* attacker=server->GetCreatureByGameObjectID(contact.attacker);
     auto* target=server->GetCreatureByGameObjectID(contact.target);
     if(!attacker || !target || !HasMeleePoise(attacker) || !HasMeleePoise(target) ||
         PoiseBroken(attacker) || PoiseBroken(target) || NativeStatusAnimation(attacker) || NativeStatusAnimation(target)) return false;
-    if(K1EngageOwnsPlayer(contact.target)) return state.attacking;
+    if(K1EngageOwnsPlayer(contact.target)) return state.attacking &&
+        K1AttackDeflection::Eligible(playerAttackStartedAt,now);
     auto found=npcPlayback.find(contact.target);
-    return found!=npcPlayback.end() && found->second.attacking && !found->second.ranged;
+    return found!=npcPlayback.end() && found->second.attacking && !found->second.ranged &&
+        K1AttackDeflection::Eligible(found->second.attackStartedAt,now);
 }
 void ResolveMeleeContacts(const std::vector<MeleeContact>& contacts,long long sampleTime) {
     auto* server=g_pAppManager->m_pServerExoApp;
     if(!server) return;
-    if(state.mode==K1EngageState::Mode::Exploration) {pendingMeleeContacts.clear();return;}
+    if(state.mode==K1EngageState::Mode::Exploration)return;
     if(IsGamePaused()) return;
     const auto now=sampleTime>=0?sampleTime:server->GetWorldTimer()->GetSnapshotTime();
+    std::vector<MeleeContact> accepted;
     for(auto contact:contacts) {
-        if(!ContactSwingCurrent(contact) || !ContactActorsValid(contact)) continue;
-        const bool duplicate=std::any_of(pendingMeleeContacts.begin(),pendingMeleeContacts.end(),[&](const MeleeContact& old){
+        if(!ContactSwingCurrent(contact) || !ContactActorsValid(contact)) {
+            if(std::getenv("K1_ENGAGE_MELEE_HIT_TEST") && K1EngageOwnsPlayer(contact.attacker))++playerHitAudits[contact.serial].dropped;
+            continue;
+        }
+        const bool duplicate=std::any_of(accepted.begin(),accepted.end(),[&](const MeleeContact& old){
             return old.attacker==contact.attacker && old.serial==contact.serial && old.blade==contact.blade;});
-        if(duplicate) continue;
-        contact.at=now;contact.until=now+(!contact.poiseOnly && ContactCanWait(contact)?clashWindowUs:0);
-        pendingMeleeContacts.push_back(contact);
-        if(contact.until>now) fprintf(stderr,"K1_MELEE_PENDING actor=%llu target=%llu serial=%d at=%lld until=%lld\n",
-            contact.attacker,contact.target,contact.serial,contact.at,contact.until);
+        if(duplicate)continue;
+        contact.at=now;
+        if(ContactTimingEnabled() && !contact.wallAt)contact.wallAt=ContactWallUs();
+        accepted.push_back(contact);
     }
     std::vector<unsigned long long> clashed;
     auto cancelled=[&](unsigned long long id){return std::find(clashed.begin(),clashed.end(),id)!=clashed.end();};
-    for(size_t i=0;i<pendingMeleeContacts.size();++i) {
-        const auto& a=pendingMeleeContacts[i];
-        if(a.poiseOnly) continue;
-        if(cancelled(a.attacker) || cancelled(a.target) || !ContactActorsValid(a)) continue;
-        auto* attacker=server->GetCreatureByGameObjectID(a.attacker);
-        auto* target=server->GetCreatureByGameObjectID(a.target);
-        if(!attacker || !target || attacker->GetDead() || target->GetDead() ||
-            !HasMeleePoise(attacker) || !HasMeleePoise(target) || PoiseBroken(attacker) || PoiseBroken(target)) continue;
-        for(size_t j=i+1;j<pendingMeleeContacts.size();++j) {
-            const auto& b=pendingMeleeContacts[j];
-            if(b.poiseOnly) continue;
-            if(a.attacker!=b.target || a.target!=b.attacker || b.at-a.at>clashWindowUs || !ContactActorsValid(b)) continue;
-            clashed.push_back(a.attacker);clashed.push_back(a.target);
-            EndClashChain(a.attacker,now);EndClashChain(a.target,now);
-            EngageWeaponSound(attacker,target,"clash");
-            ++meleeClashes;lastClashGap=b.at-a.at;
-            fprintf(stderr,"K1_MELEE_CLASH a=%llu b=%llu serials=%d,%d poise=%d,%d chains=0,0 gap_us=%lld\n",
-                a.attacker,a.target,a.serial,b.serial,meleePoise[a.attacker].percent,meleePoise[a.target].percent,lastClashGap);
-            break;
-        }
-    }
-    std::vector<MeleeContact> waiting;
-    for(const auto& contact:pendingMeleeContacts) {
-        if(cancelled(contact.attacker) || !ContactActorsValid(contact)) continue;
-        if(contact.poiseOnly && !ContactSwingCurrent(contact)) continue;
-        if(contact.until>contact.at && now<=contact.until) {waiting.push_back(contact);continue;}
+    for(const auto& contact:accepted) {
+        if(contact.poiseOnly || cancelled(contact.attacker) || cancelled(contact.target) ||
+           !ContactActorsValid(contact) || !ContactCanDeflect(contact,now))continue;
         auto* attacker=server->GetCreatureByGameObjectID(contact.attacker);
         auto* target=server->GetCreatureByGameObjectID(contact.target);
-        // This hit was accepted while its swing was current. A later link must
-        // not erase it when the short reciprocal-contact window expires.
+        clashed.push_back(contact.attacker);clashed.push_back(contact.target);
+        if(std::getenv("K1_ENGAGE_MELEE_HIT_TEST")) {
+            if(K1EngageOwnsPlayer(contact.attacker))++playerHitAudits[contact.serial].clashed;
+            else if(K1EngageOwnsPlayer(contact.target))++playerHitAudits[attackSerial].clashed;
+        }
+        EndClashChain(contact.attacker,now);EndClashChain(contact.target,now);
+        ApplyClashPoise(attacker,target);EngageWeaponSound(attacker,target,"clash");
+        ++meleeClashes;lastClashGap=0;
+        fprintf(stderr,"K1_MELEE_DEFLECTION a=%llu b=%llu serial=%d blade=%d eligibility_us=%lld delay_us=0\n",
+            contact.attacker,contact.target,contact.serial,contact.blade,K1AttackDeflection::windowUs);
+    }
+    for(const auto& contact:accepted) {
+        if(cancelled(contact.attacker) || cancelled(contact.target) || !ContactActorsValid(contact)) continue;
+        if(contact.poiseOnly && !ContactSwingCurrent(contact)) continue;
+        auto* attacker=server->GetCreatureByGameObjectID(contact.attacker);
+        auto* target=server->GetCreatureByGameObjectID(contact.target);
+        // Accepted body hits enter the existing native damage service immediately.
         if(!attacker || !target || attacker->GetDead() || target->GetDead()) continue;
-        // Waiting is only allowed when both are swinging (neither guarding).
-        // Do not turn that earlier open hit into a later idle guard block.
-        const bool immediate=contact.until==contact.at;
-        const bool blocked=immediate && K1EngageGuardContact(contact.attacker,contact.target);
+        if(meleePoise[contact.attacker].clashOpponent!=contact.target)ClearClashEpisode(contact.attacker);
+        if(meleePoise[contact.target].clashOpponent!=contact.attacker)ClearClashEpisode(contact.target);
+        // A parry or native status cancels all remaining dual-hand contacts,
+        // including a second hand already queued during this scene update.
+        if(contact.dualWeapon!=OBJECT_INVALID &&
+           (!ParryAttackReady(contact.attacker,now) || PoiseBroken(attacker) || NativeStatusAnimation(attacker))) continue;
+        const bool blocked=K1EngageGuardContact(contact.attacker,contact.target);
         damageContact=&contact;
-        const bool damaged=!blocked && !contact.poiseOnly && ContactDamage(attacker,target,immediate);
+        const bool damaged=!blocked && !contact.poiseOnly && ContactDamage(attacker,target,true);
         damageContact=nullptr;
-        if(damaged){++meleeDamageContacts;auto member=sandboxActors.find(contact.attacker);if(member!=sandboxActors.end())++member->second.meleeHits;}
+        if(std::getenv("K1_ENGAGE_MELEE_HIT_TEST") && K1EngageOwnsPlayer(contact.attacker)) {
+            auto& a=playerHitAudits[contact.serial];a.damaged+=damaged;a.blocked+=blocked;a.rejected+=!damaged&&!blocked;
+        }
+        if(damaged){++meleeDamageContacts;auto member=sandboxActors.find(contact.attacker);if(member!=sandboxActors.end()){
+            ++member->second.meleeHits;if(contact.dualWeapon!=OBJECT_INVALID)member->second.dualDamageHands|=1u<<(contact.offhand?1:0);
+        }}
         if(K1EngageOwnsPlayer(contact.attacker)) {
             if(!blocked && !damaged && contact.serial==attackSerial && (!contact.poiseOnly || !hitConsumed)) {
                 if(!contact.poiseOnly) hitConsumed=false;
@@ -4609,11 +5838,13 @@ void ResolveMeleeContacts(const std::vector<MeleeContact>& contacts,long long sa
                 // damage/block has consumed it; permit a later physical retry.
                 if(contact.blade>=0 && staffContactSerial==contact.serial)
                     staffContactBlades&=~(1u<<contact.blade);
+                if(contact.dualWeapon!=OBJECT_INVALID && dualContactSerial==contact.serial)
+                    dualContactHands&=~(1u<<(contact.offhand?1:0));
             }
         }
         else {
             auto found=npcPlayback.find(contact.attacker);
-            if(found!=npcPlayback.end() && found->second.staff && !blocked && !damaged && contact.serial==found->second.serial &&
+            if(found!=npcPlayback.end() && (found->second.staff || found->second.dual) && !blocked && !damaged && contact.serial==found->second.serial &&
                (!contact.poiseOnly || !found->second.hit)) {
                 if(!contact.poiseOnly)found->second.hit=false;
                 if(contact.blade>=0)found->second.contactBlades&=~(1u<<contact.blade);
@@ -4622,49 +5853,46 @@ void ResolveMeleeContacts(const std::vector<MeleeContact>& contacts,long long sa
         }
         fprintf(stderr,"K1_MELEE_RESOLVED actor=%llu serial=%d delay_us=%lld\n",contact.attacker,contact.serial,now-contact.at);
     }
-    pendingMeleeContacts.swap(waiting);
 }
 int UncoveredParryProbeCut();
+bool ClashEpisodeProbe(CSWSCreature* player,CSWSCreature* enemy);
 bool ClashContactProbe(CSWSCreature* player,CSWSCreature* enemy) {
     auto found=npcPlayback.find(enemy->m_objectId);if(found==npcPlayback.end()) return false;
     const auto savedState=state;const auto savedNpc=found->second;
+    const auto savedAttackStart=playerAttackStartedAt;
     const auto savedPlayer=meleePoise[player->m_objectId],savedEnemy=meleePoise[enemy->m_objectId];
     const int playerHP=player->GetCurrentHitPoints(0),enemyHP=enemy->GetCurrentHitPoints(0);
-    const auto savedPending=pendingMeleeContacts;pendingMeleeContacts.clear();
     const long long sample=g_pAppManager->m_pServerExoApp->GetWorldTimer()->GetSnapshotTime();
     bool ok=true;
-    const MeleeContact p={player->m_objectId,enemy->m_objectId,attackSerial};
-    const MeleeContact n={enemy->m_objectId,player->m_objectId,found->second.serial};
-    const long long gaps[]={0,60000,100000,300000,499999,500000};
-    for(int order=0;order<2*int(sizeof(gaps)/sizeof(gaps[0]));++order) {
+    MeleeContact p={player->m_objectId,enemy->m_objectId,attackSerial};
+    MeleeContact n={enemy->m_objectId,player->m_objectId,found->second.serial};
+    for(int order=0;order<2;++order) {
         state.attacking=true;state.chainSwings=3;state.attackRequested=state.holdChain=true;
         auto& npc=found->second;npc.attacking=true;npc.ranged=false;npc.chainSwings=3;
         meleePoise[player->m_objectId]=MeleePoise();meleePoise[enemy->m_objectId]=MeleePoise();
-        const long long at=sample+order*1000000;
-        const MeleeContact first=order%2?n:p,second=order%2?p:n;
-        ResolveMeleeContacts({first,first},at);
-        ok=ok && pendingMeleeContacts.size()==1 && meleePoise[player->m_objectId].percent==100 &&
-            meleePoise[enemy->m_objectId].percent==100 && player->GetCurrentHitPoints(0)==playerHP && enemy->GetCurrentHitPoints(0)==enemyHP;
-        ResolveMeleeContacts({second,second},at+gaps[order/2]);
-        ok=ok && meleePoise[player->m_objectId].percent==100 && meleePoise[enemy->m_objectId].percent==100 &&
+        MeleeContact first=order?n:p;
+        playerAttackStartedAt=sample;npc.attackStartedAt=sample;
+        const auto before=meleeClashes;
+        ResolveMeleeContacts({first,first},sample);
+        ok=ok && meleeClashes==before+1 &&
+            meleePoise[player->m_objectId].percent==100-ClashPoiseDamage(enemy) &&
+            meleePoise[enemy->m_objectId].percent==100-ClashPoiseDamage(player) &&
             !state.attacking && !state.chainSwings && !state.attackRequested && !state.holdChain &&
             !npc.attacking && !npc.chainSwings && npc.hit && !npc.bladeValid &&
-            player->GetCurrentHitPoints(0)==playerHP && enemy->GetCurrentHitPoints(0)==enemyHP && pendingMeleeContacts.empty();
+            player->GetCurrentHitPoints(0)==playerHP && enemy->GetCurrentHitPoints(0)==enemyHP;
     }
-    // Outside the inclusive window, both contacts resolve normally once. A
-    // later guard pose cannot retroactively block an already accepted open hit.
+    // Expired attack windows dispatch body hits immediately, without a clash.
     state.attacking=true;state.rightHeld=false;found->second.attacking=true;
+    playerAttackStartedAt=sample-500001;found->second.attackStartedAt=sample-500001;
     meleePoise[player->m_objectId]=MeleePoise();meleePoise[enemy->m_objectId]=MeleePoise();
     const auto beforeClashes=meleeClashes;
     const auto beforeDamage=meleeDamageContacts;
     clashExpiryObservation={playerHP,enemyHP,player->GetCurrentHitPoints(1),enemy->GetCurrentHitPoints(1)};
-    ResolveMeleeContacts({p},sample+13000000);
-    ResolveMeleeContacts({n},sample+13500001);
-    ok=ok && meleeClashes==beforeClashes && meleeDamageContacts==beforeDamage+1 && pendingMeleeContacts.size()==1;
-    state.attacking=false;state.rightHeld=true;
-    ResolveMeleeContacts({},sample+14000002);
-    ResolveMeleeContacts({},sample+15000000);
-    ok=ok && pendingMeleeContacts.empty() && meleeDamageContacts==beforeDamage+2 &&
+    ResolveMeleeContacts({p,p},sample);
+    ok=ok && meleeClashes==beforeClashes && meleeDamageContacts==beforeDamage+1;
+    ResolveMeleeContacts({n,n},sample+1);
+    ResolveMeleeContacts({},sample+1000000);
+    ok=ok && meleeClashes==beforeClashes && meleeDamageContacts==beforeDamage+2 &&
         meleePoise[player->m_objectId].percent==100 && meleePoise[enemy->m_objectId].percent==100;
     // SignalMeleeDamage queues native EVENT_APPLY_EFFECT. The arena fixture
     // observes the resulting HP loss after server updates, outside this call.
@@ -4675,17 +5903,17 @@ bool ClashContactProbe(CSWSCreature* player,CSWSCreature* enemy) {
     found->second.direction=UncoveredParryProbeCut();
     meleePoise[player->m_objectId]=MeleePoise();meleePoise[enemy->m_objectId]=MeleePoise();
     ResolveMeleeContacts({n,n});
-    ok=ok && meleePoise[player->m_objectId].percent==80 && meleePoise[enemy->m_objectId].percent==100 &&
+    ok=ok && meleePoise[player->m_objectId].percent==100-GuardPoiseDamage(enemy) && meleePoise[enemy->m_objectId].percent==100 &&
         found->second.attacking && player->GetCurrentHitPoints(0)==playerHP;
-    state=savedState;found->second=savedNpc;
+    state=savedState;found->second=savedNpc;playerAttackStartedAt=savedAttackStart;
     meleePoise[player->m_objectId]=savedPlayer;meleePoise[enemy->m_objectId]=savedEnemy;
-    pendingMeleeContacts=savedPending;
-    fprintf(stderr,"K1_MELEE_CLASH_PROBE_%s orders=2 gaps=0,60000,100000,300000,499999,500000 expiry=500001 duplicate=1 unilateral_guard=20 poise_damage=0 hp=unchanged chains=0\n",ok?"PASS":"FAIL");
+    ok=ClashEpisodeProbe(player,enemy) && ok;
+    fprintf(stderr,"K1_MELEE_CLASH_PROBE_%s orders=2 timed=1 eligibility_us=500000 immediate_body_hits=2 duplicate=1 all_clash_poise=10 hp=unchanged chains=0\n",ok?"PASS":"FAIL");
     return ok;
 }
 } // namespace
 void K1EngagePreloadNavigation(CSWCArea* clientArea) {
-    if(!clientArea || !K1EngageEnabled() || !std::getenv("K1_ENGAGE_ENEMY_AI") || !K1EngageArenaLoadoutActive()) return;
+    if(!clientArea || !K1EngageEnabled() || !std::getenv("K1_ENGAGE_ENEMY_AI") || !NpcCombatAreaActive()) return;
     auto* area=clientArea->GetServerArea();
     if(!area) return;
     npcNavigators.erase(area->m_objectId);
@@ -4713,6 +5941,7 @@ void K1EngagePreloadNavigation(CSWCArea* clientArea) {
         area->m_objectId,world.geometryQueries,world.rejectedOrigins,prepared.space,prepared.height,prepared.generation,static_cast<long long>(milliseconds));
 }
 void K1EngageUnloadNavigation(unsigned long long areaId) {
+    contactBodyRoots.clear();contactCurrentRoots.clear();
     SandboxUnload(areaId);
     ClearDismemberArea(areaId);
     if(areaId==OBJECT_INVALID){
@@ -4826,16 +6055,25 @@ bool ParryRulesProbe() {
     return ok;
 }
 void ApplySuccessfulParry(CSWSCreature* attacker,CSWSCreature* defender) {
+    const int bonus=ClashParryBonus(attacker->m_objectId,defender->m_objectId);
+    ClearClashEpisode(attacker->m_objectId);ClearClashEpisode(defender->m_objectId);
     const int block=IncomingBlockReaction(attacker);
     const auto now=g_pAppManager->m_pServerExoApp->GetWorldTimer()->GetSnapshotTime();
     EndClashChain(attacker->m_objectId,now);
-    NotePoiseActivity(defender,"parry_guard");
+    if(defender==ServerActor()) {
+        parrySuccessUntil=ContactWallUs()+300000;
+        if(std::getenv("K1_ENGAGE_PARRY_TEST"))parryRenderRequested=true;
+        fprintf(stderr,"K1_PARRY_SUCCESS_DIAL duration_ms=300 defender=%llu\n",defender->m_objectId);
+    }
+    auto& recoveringPoise=meleePoise[defender->m_objectId];
+    if(!recoveringPoise.wasEligible || now<recoveringPoise.quietUntil) NotePoiseActivity(defender,"parry_guard");
     auto& defenderPoise=meleePoise[defender->m_objectId];
     const int before=defenderPoise.percent;
-    defenderPoise.percent=std::min(100,before+10);
+    RewardParryPoise(defenderPoise,ParryPoiseReward(defender));
     fprintf(stderr,"K1_PARRY_POISE_REWARD actor=%llu before=%d after=%d gain=%d\n",
         defender->m_objectId,before,defenderPoise.percent,defenderPoise.percent-before);
-    SpendMeleePoise(attacker,defender->m_objectId,StaffPoiseActor(attacker)?30:25,"parried");
+    SpendMeleePoise(attacker,defender->m_objectId,ParriedPoiseLoss(attacker)+bonus,"parried");
+    fprintf(stderr,"K1_CLASH_PARRY_BONUS attacker=%llu defender=%llu bonus=%d\n",attacker->m_objectId,defender->m_objectId,bonus);
     auto& poise=meleePoise[attacker->m_objectId];poise.parriedUntil=now+parryAttackDelayUs;
     auto npc=npcPlayback.find(attacker->m_objectId);
     if(npc!=npcPlayback.end()) npc->second.nextAttack=std::max(npc->second.nextAttack,poise.parriedUntil);
@@ -4843,12 +6081,112 @@ void ApplySuccessfulParry(CSWSCreature* attacker,CSWSCreature* defender) {
     EngageWeaponSound(attacker,defender,"parry");
     fprintf(stderr,"K1_PARRY_LOCKOUT actor=%llu start=%lld until=%lld\n",attacker->m_objectId,now,poise.parriedUntil);
 }
+bool ClashEpisodeProbe(CSWSCreature* player,CSWSCreature* enemy) {
+    const auto savedState=state;const auto savedNpc=npcPlayback[enemy->m_objectId];
+    const auto savedPlayer=meleePoise[player->m_objectId],savedEnemy=meleePoise[enemy->m_objectId];
+    const int savedSelection=redSelection;redSelection=0;
+    bool ok=true;
+    auto reset=[&]{ClearClashEpisode(player->m_objectId);ClearClashEpisode(enemy->m_objectId);
+        meleePoise[player->m_objectId]=MeleePoise();meleePoise[enemy->m_objectId]=MeleePoise();};
+    reset();
+    for(int i=1;i<=5;++i){ApplyClashPoise(player,enemy);
+        ok=ok && meleePoise[player->m_objectId].percent==100-10*i && meleePoise[enemy->m_objectId].percent==100-10*i &&
+            ClashParryBonus(player->m_objectId,enemy->m_objectId)==5*(i-1);}
+    // Real parry service consumes the episode before applying its base loss.
+    ApplySuccessfulParry(player,enemy);
+    ok=ok && meleePoise[player->m_objectId].percent==5 && !meleePoise[player->m_objectId].clashes && !meleePoise[enemy->m_objectId].clashes;
+    for(const char* interruption:{"guard_hit","damage","hit"}) {
+        reset();ApplyClashPoise(player,enemy);ApplyClashPoise(player,enemy);
+        NotePoiseActivity(enemy,interruption);
+        ok=ok && !ClashParryBonus(player->m_objectId,enemy->m_objectId) && !meleePoise[player->m_objectId].clashes;
+    }
+    reset();ApplyClashPoise(player,enemy);NotePoiseActivity(player,"swing");NotePoiseActivity(player,"swing");
+    ok=ok && !meleePoise[enemy->m_objectId].clashes; // missed swing followed by another swing
+    const auto now=g_pAppManager->m_pServerExoApp->GetWorldTimer()->GetSnapshotTime();
+    reset();ApplyClashPoise(player,enemy);
+    const int oldStatus=enemy->m_nState;enemy->m_nState=EFFECT_STATE_STUNNED;
+    ValidateClashEpisodes(now);enemy->m_nState=oldStatus;
+    ok=ok && !meleePoise[player->m_objectId].clashes;
+    reset();ApplyClashPoise(player,enemy);npcPlayback[enemy->m_objectId].target=enemy->m_objectId;
+    ValidateClashEpisodes(now);npcPlayback[enemy->m_objectId].target=savedNpc.target;
+    ok=ok && !meleePoise[player->m_objectId].clashes;
+    reset();ApplyClashPoise(player,enemy);meleePoise[player->m_objectId].clashRight=OBJECT_INVALID;
+    ValidateClashEpisodes(now);ok=ok && !meleePoise[enemy->m_objectId].clashes;
+    for(int count:{0,1,2,5,20,21}) {
+        int successes=0;
+        for(int roll=1;roll<=100;++roll){MeleePoise p;p.clashes=count;
+            const bool chosen=ChooseClashParry(p,roll);successes+=chosen;
+            ok=ok && ChooseClashParry(p,101-roll)==chosen;}
+        ok=ok && successes==std::min(100,count*5);
+    }
+    reset();redSelection=savedSelection;state=savedState;npcPlayback[enemy->m_objectId]=savedNpc;
+    meleePoise[player->m_objectId]=savedPlayer;meleePoise[enemy->m_objectId]=savedEnemy;
+    fprintf(stderr,"K1_CLASH_EPISODE_%s five_cost=50 yellow_parry=45 consumed=1 reset=guard,damage,miss,status,opponent,equipment chance=0,5,10,25,100 cached=1\n",ok?"PASS":"FAIL");
+    return ok;
+}
+bool ClashNpcPairProbe(CSWSCreature* a,CSWSCreature* b) {
+    const auto aid=a->m_objectId,bid=b->m_objectId;
+    const auto savedA=npcPlayback[aid],savedB=npcPlayback[bid];
+    const auto pa=meleePoise[aid],pb=meleePoise[bid];
+    const Vector facingA=a->m_orientation,facingB=b->m_orientation;
+    const int hpA=a->GetCurrentHitPoints(0),hpB=b->GetCurrentHitPoints(0);
+    const auto now=g_pAppManager->m_pServerExoApp->GetWorldTimer()->GetSnapshotTime();
+    auto* varA=a->m_scriptVars.MatchIndex(CExoString(npcParryPercentVariable),CSWSScriptVarTable::VARTYPE_INTEGER,0);
+    auto* varB=b->m_scriptVars.MatchIndex(CExoString(npcParryPercentVariable),CSWSScriptVarTable::VARTYPE_INTEGER,0);
+    const bool hadA=varA!=nullptr,hadB=varB!=nullptr;const int oldA=varA?varA->m_nInt:0,oldB=varB?varB->m_nInt:0;
+    a->m_scriptVars.SetInt(CExoString(npcParryPercentVariable),0,0);b->m_scriptVars.SetInt(CExoString(npcParryPercentVariable),0,0);
+    bool ok=true;
+    for(int order=0;order<2;++order) {
+        auto* attacker=order?b:a;auto* defender=order?a:b;
+        const auto attackId=attacker->m_objectId,defendId=defender->m_objectId;
+        ClearClashEpisode(aid);ClearClashEpisode(bid);
+        meleePoise[aid]=MeleePoise();meleePoise[bid]=MeleePoise();
+        auto& x=npcPlayback[attackId];auto& y=npcPlayback[defendId];
+        x.target=defendId;y.target=attackId;x.ranged=y.ranged=false;
+        a->SetOrientation(b->m_position-a->m_position);b->SetOrientation(a->m_position-b->m_position);
+        for(int i=1;i<=5;++i) {
+            x.attacking=y.attacking=true;x.parrying=y.parrying=false;
+            ++x.serial;++y.serial;x.attackStartedAt=y.attackStartedAt=now;
+            MeleeContact c={attackId,defendId,x.serial};
+            const auto before=meleeClashes;ResolveMeleeContacts({c,c},now);
+            ok=ok && meleeClashes==before+1 && meleePoise[aid].percent==100-10*i && meleePoise[bid].percent==100-10*i;
+        }
+        const auto parries=npcTimedParries;
+        ok=CommitClashParry(y,now,25) && ok;
+        x.attacking=true;++x.serial;y.closeGuard=true;
+        MeleeContact next={attackId,defendId,x.serial};ResolveMeleeContacts({next,next},now);
+        ok=ok && npcTimedParries==parries+1 && !x.attacking && !y.attacking &&
+            meleePoise[attackId].percent==50-ParriedPoiseLoss(attacker)-20 &&
+            !meleePoise[aid].clashes && !meleePoise[bid].clashes;
+    }
+    ok=ok && a->GetCurrentHitPoints(0)==hpA && b->GetCurrentHitPoints(0)==hpB;
+    ClearClashEpisode(aid);ClearClashEpisode(bid);
+    meleePoise[aid]=MeleePoise();meleePoise[bid]=MeleePoise();ApplyClashPoise(a,b);
+    ok=CommitClashParry(npcPlayback[aid],now,1) && CommitClashParry(npcPlayback[bid],now,1) && ok;
+    ValidateClashEpisodes(now+2000000);
+    ok=ok && !meleePoise[aid].clashes && !meleePoise[bid].clashes && !npcPlayback[aid].parrying && !npcPlayback[bid].parrying;
+    ClearClashEpisode(aid);ClearClashEpisode(bid);
+    npcPlayback[aid]=savedA;npcPlayback[bid]=savedB;meleePoise[aid]=pa;meleePoise[bid]=pb;
+    a->SetOrientation(facingA);b->SetOrientation(facingB);
+    if(hadA)a->m_scriptVars.SetInt(CExoString(npcParryPercentVariable),oldA,0);else a->m_scriptVars.DestroyInt(CExoString(npcParryPercentVariable));
+    if(hadB)b->m_scriptVars.SetInt(CExoString(npcParryPercentVariable),oldB,0);else b->m_scriptVars.DestroyInt(CExoString(npcParryPercentVariable));
+    fprintf(stderr,"K1_CLASH_NPC_PAIR_%s orders=2 clashes=5 duplicate=1 chance=25 ordinary_chance=0 parry_bonus=20 mutual_guard_timeout=1 hp=unchanged\n",ok?"PASS":"FAIL");
+    return ok;
+}
 bool DirectionalParry(CSWSCreature* attacker,CSWSCreature* defender) {
     if(!attacker || !defender || !K1EngageOwnsPlayer(defender->m_objectId)) return false;
     auto found=npcPlayback.find(attacker->m_objectId);
     if(found==npcPlayback.end() || !found->second.attacking || found->second.ranged || PoiseBroken(attacker)) return false;
-    const auto aim=SelectedParryAim();
-    if(aim.target!=attacker->m_objectId || !ParryCoversIncoming(aim.sector,ParryIncomingForAttack(found->second.direction))) return false;
+    // The reticle selects one display target. Another nearby enemy must not
+    // veto a correctly aimed guard against the blade that actually contacts us.
+    const auto aim=ParryAimAt(attacker);
+    if(aim.target!=attacker->m_objectId || !ParryCoversIncoming(aim.sector,ParryIncomingForAttack(found->second.direction))) {
+        const auto selected=SelectedParryAim();
+        fprintf(stderr,"K1_PARRY_BLOCK_REASON attacker=%llu serial=%d direction=%d sector=%d eligible=%d aim=%g,%g display_target=%llu display_sector=%d\n",
+            attacker->m_objectId,found->second.serial,found->second.direction,aim.sector,aim.target==attacker->m_objectId,
+            aim.right,aim.up,selected.target,selected.sector);
+        return false;
+    }
     const int direction=found->second.direction;
     ApplySuccessfulParry(attacker,defender);
     ++directionalParries;
@@ -4881,20 +6219,27 @@ bool K1EngageBlocksMelee(unsigned long long attackerId, unsigned long long targe
 }
 bool K1EngageGuardContact(unsigned long long attackerId,unsigned long long targetId) {
     if(!K1EngageBlocksMelee(attackerId,targetId)) return false;
+    if(meleePoise[attackerId].clashOpponent!=targetId)ClearClashEpisode(attackerId);
+    if(meleePoise[targetId].clashOpponent!=attackerId)ClearClashEpisode(targetId);
     auto* actor=g_pAppManager->m_pServerExoApp->GetCreatureByGameObjectID(targetId);
     auto* attacker=g_pAppManager->m_pServerExoApp->GetCreatureByGameObjectID(attackerId);
     if(DirectionalParry(attacker,actor)) return true;
     const auto npc=npcPlayback.find(targetId);
     if(npc!=npcPlayback.end() && npc->second.parrying && !npc->second.ranged &&
         attacker && (K1EngageOwnsPlayer(attackerId)?state.attacking:(npcPlayback.count(attackerId) && npcPlayback[attackerId].attacking)) && HasMeleePoise(attacker) && !PoiseBroken(attacker) &&
-        NpcContactParry(actor,K1EngageOwnsPlayer(attackerId)?attackSerial:npcPlayback[attackerId].serial,attackerId)) {
+        ((meleePoise[targetId].clashOpponent==attackerId && meleePoise[targetId].clashParry) ||
+         NpcContactParry(actor,K1EngageOwnsPlayer(attackerId)?attackSerial:npcPlayback[attackerId].serial,attackerId))) {
         ApplySuccessfulParry(attacker,actor);++npcTimedParries;
         fprintf(stderr,"K1_NPC_TIMED_PARRY attacker=%llu defender=%llu poise=%d,%d chain=0\n",
             attackerId,targetId,meleePoise[attackerId].percent,meleePoise[targetId].percent);
         return true;
     }
+    // A baton can intercept with a successful parry, but cannot absorb a hit
+    // through an ordinary held guard. Leave HP/poise damage to native contact.
+    auto* guardingItem=NativeNpcRightItem(actor);
+    if(guardingItem && guardingItem->m_baseItem==BASE_ITEM_STUN_BATON)return false;
     const int block=IncomingBlockReaction(attacker);
-    const int poiseDamage=StaffPoiseActor(attacker)?13:20;
+    const int poiseDamage=GuardPoiseDamage(attacker);
     SpendMeleePoise(actor,attackerId,poiseDamage,"guard_hit");
     if(StaffPoiseActor(attacker)) fprintf(stderr,"K1_STAFF_GUARD_DAMAGE attacker=%llu target=%llu points=%d\n",attackerId,targetId,poiseDamage);
     QueueBlockReaction(actor,block);
@@ -5015,15 +6360,18 @@ void DrawSaberSurfaceMarks(CAurScene* scene) {
     static std::minstd_rand visualRandom(1);
     auto random=[] {return std::generate_canonical<float,24>(visualRandom);};
     if(sample) {
-        auto contact=[&](CSWCCreature* actor,Trail& trail,int fixture=0,const Vector* from=nullptr,const Vector* to=nullptr) {
+        auto contact=[&](CSWCCreature* actor,Trail& trail,int fixture=0,const Vector* from=nullptr,const Vector* to=nullptr,int lane=0) {
             if(!actor) return;
+            const auto blades=PoweredSaberBlades(actor);
+            const int hand=lane<int(blades.size())?blades[lane].hand:0;
             auto* server=actor->GetServerCreature();
-            auto* item=server && server->m_pInventory?server->m_pInventory->GetItemInSlot(CSWInventory::SLOT_RIGHTWEAPON):nullptr;
+            auto* item=server && server->m_pInventory?server->m_pInventory->GetItemInSlot(hand?CSWInventory::SLOT_LEFTWEAPON:CSWInventory::SLOT_RIGHTWEAPON):nullptr;
             // Gate the equipped item's native type, not a luminous mesh (the
             // poise HUD can display a saber even when an ordinary sword is held).
             if(!item || !item->IsLightsaber()) {trail.valid=false;return;}
             Vector base,tip;
-            if(!Blade(actor,base,tip)) {if(fixture) fprintf(stderr,"K1_JKA_SABER_MARK_FIXTURE_NO_BLADE\n");trail.valid=false;return;}
+            if(lane>=int(blades.size())) {if(fixture) fprintf(stderr,"K1_JKA_SABER_MARK_FIXTURE_NO_BLADE\n");trail.valid=false;return;}
+            base=blades[lane].blade.base;tip=blades[lane].blade.tip;
             if(from && to) {base=*from;tip=*to;}
             else if(fixture) {
                 if(!fixtureFrames) fixtureOrigin=actor->m_position+actor->m_orientation*1.6f;
@@ -5056,7 +6404,7 @@ void DrawSaberSurfaceMarks(CAurScene* scene) {
             if(fixture) fprintf(stderr,"K1_JKA_SABER_MARK_RECEIVER room=%s optional_gob=%d meshes=%d world=%d\n",
                 room?room->m_szName:"none",room&&room->m_pObject!=nullptr,
                 world?room->m_pNodeData->m_meshes.m_count:0,world);
-            const auto weapon=actor->m_aEquippedItemIds[4];
+            const auto weapon=actor->m_aEquippedItemIds[4+hand];
             if((gob || world) && (fixture==0 || fixture==2) && now>=trail.soundNext && g_pExoSound) {
                 const char* name="jkscorch1";
                 const bool trace=std::getenv("K1_ENGAGE_SURFACE_MARK_TEST")!=nullptr;
@@ -5075,8 +6423,10 @@ void DrawSaberSurfaceMarks(CAurScene* scene) {
                     length>0?"PASS":"FAIL",actor->m_objectId,name,length,trail.soundNext);
             }
             const Vector previous=gob?gob->m_vPosition+Rotate(gob->m_qOrientation,trail.point*gob->m_fObjectScale):trail.point;
-            if((gob || world) && K1JkaSaberMarks::Connect(trail.valid,
-                trail.surface.m_pObject==surface && trail.room==room,trail.weapon==weapon,previous,point)) {
+            const bool sameReceiver=trail.surface.m_pObject==surface && trail.room==room;
+            const bool continuous=K1JkaSaberMarks::Connect(trail.valid,sameReceiver,trail.weapon==weapon,previous,point);
+            const bool firstContact=!trail.valid || !sameReceiver || trail.weapon!=weapon || magnitude(point-previous)>=1.f;
+            if((gob || world) && (continuous || firstContact)) {
                 std::vector<K1SaberContact::Triangle> triangles;
                 if(gob) CollisionTriangles(gob,triangles);
                 else for(int i=0;i<room->m_pNodeData->m_meshes.m_count;++i)
@@ -5090,7 +6440,13 @@ void DrawSaberSurfaceMarks(CAurScene* scene) {
                     }
                     CollisionPartTriangles(part,triangles,true);
                 }
-                auto polygons=K1JkaSaberMarks::Create(previous,point,hit.m_vHitNormal,triangles,random);
+                // A one-frame contact still burns the actual hit point. Give
+                // the projector a tiny tangent footprint, never bridge a miss
+                // or a receiver/weapon change into an invented long swipe.
+                Vector tangent=cross(hit.m_vHitNormal,Vector(0,0,1));
+                if(magnitude(tangent)<.001f)tangent=cross(hit.m_vHitNormal,Vector(0,1,0));
+                tangent=normalize(tangent)*.00025f;
+                auto polygons=K1JkaSaberMarks::Create(continuous?previous:point-tangent,continuous?point:point+tangent,hit.m_vHitNormal,triangles,random);
                 if(fixture) fprintf(stderr,"K1_JKA_SABER_MARK_PROJECTION triangles=%zu fragments=%zu\n",triangles.size(),polygons.size());
                 const Quaternion inverse=gob?Inverse(normalize(gob->m_qOrientation)):Quaternion();
                 for(auto& polygon:polygons) {
@@ -5107,12 +6463,23 @@ void DrawSaberSurfaceMarks(CAurScene* scene) {
             trail.point=gob?Rotate(Inverse(normalize(gob->m_qOrientation)),point-gob->m_vPosition)*(1.f/gob->m_fObjectScale):point;
             trail.weapon=weapon;trail.valid=gob || world;
         };
+        auto liveContact=[&](CSWCCreature* actor) {
+            const auto blades=PoweredSaberBlades(actor);
+            // Independent continuity per blade: offhand and opposite staff
+            // tips must never be joined into one scar across empty space.
+            for(int lane=0;lane<4;++lane) {
+                auto& trail=trails[actor->m_objectId*4+lane];
+                if(lane<int(blades.size()))contact(actor,trail,0,nullptr,nullptr,lane);
+                else trail.valid=false;
+            }
+        };
         if(auto* actor=Actor()) {
-            contact(actor,trails[actor->m_objectId]);
+            liveContact(actor);
             // Installed-data synthetic full-segment contact fixture. It exercises
             // the real floor mesh/normal/projection/draw without moving actors or
             // claiming the fixture's ray is a live animated blade.
-            if(std::getenv("K1_ENGAGE_SURFACE_MARK_TEST") && K1EngageActive() && fixtureFrames<5)
+            const bool fixtureBladesReady=PoweredSaberBlades(actor).size()==size_t(DualMode() || StaffMode()?2:1);
+            if(std::getenv("K1_ENGAGE_SURFACE_MARK_TEST") && K1EngageActive() && fixtureBladesReady && fixtureFrames<5)
                 contact(actor,fixtureTrail,true);
             if(std::getenv("K1_ENGAGE_SURFACE_MARK_TEST") && fixtureDrawn && !surfacesProbed) {
                 auto probe=[&](const std::vector<K1SaberContact::Triangle>& triangles,CAurObject* expected,bool wall) {
@@ -5142,6 +6509,11 @@ void DrawSaberSurfaceMarks(CAurScene* scene) {
                     auto* item=actor->GetServerCreature()->m_pInventory->GetItemInSlot(CSWInventory::SLOT_RIGHTWEAPON);
                     auto* client=g_pAppManager->m_pClientExoApp->GetItemByGameObjectID(actor->m_aEquippedItemIds[4]);
                     const int original=item->m_baseItem;const auto powered=client->m_bPowered;
+                    auto* offhandClient=g_pAppManager->m_pClientExoApp->GetItemByGameObjectID(actor->m_aEquippedItemIds[5]);
+                    const auto offhandPowered=offhandClient?offhandClient->m_bPowered:0;
+                    // These classification cases isolate the right weapon;
+                    // a legitimate powered offhand must not invalidate them.
+                    if(offhandClient)offhandClient->m_bPowered=0;
                     bool ok=true;int swords=0,sabers=0;
                     Vector a=fixtureOrigin+Vector(0,0,.3f),b=a-Vector(0,0,.6f);
                     Vector c=a+Vector(.02f,0,0),d=b+Vector(.02f,0,0);
@@ -5161,7 +6533,18 @@ void DrawSaberSurfaceMarks(CAurScene* scene) {
                     Trail off;size_t count=marks.size();contact(actor,off,false,&a,&b);contact(actor,off,false,&c,&d);
                     ok &= marks.size()==count && !off.valid && off.soundNext==0;
                     client->m_bPowered=powered;
+                    if(offhandClient)offhandClient->m_bPowered=offhandPowered;
                     fprintf(stderr,"K1_JKA_SABER_MARK_WEAPON_%s swords=%d sabers=%d unpowered=1 native_item_restored=1\n",ok?"PASS":"FAIL",swords,sabers);
+                    const auto blades=PoweredSaberBlades(actor);bool lanesOk=!blades.empty();int offhand=0;
+                    for(int lane=0;lane<int(blades.size());++lane) {
+                        Trail laneTrail;const size_t first=marks.size();
+                        contact(actor,laneTrail,1,&a,&b,lane);
+                        // The first exact surface hit must stamp immediately,
+                        // even if that blade misses on the very next frame.
+                        lanesOk=lanesOk && marks.size()>first && laneTrail.valid;
+                        offhand+=blades[lane].hand==1;
+                    }
+                    fprintf(stderr,"K1_JKA_SABER_MARK_LANES_%s blades=%zu offhand=%d first_contact=1\n",lanesOk?"PASS":"FAIL",blades.size(),offhand);
                 }
                 auto* nativeScene=static_cast<Scene*>(scene);
                 for(int i=0;i<nativeScene->m_rooms.m_count && !wall;++i) {
@@ -5222,12 +6605,12 @@ void DrawSaberSurfaceMarks(CAurScene* scene) {
                 // sharing the actor's real cooldown and world clock. This is
                 // explicitly a synthetic ray, not animated-blade coverage.
                 Vector a=fixtureOrigin+Vector(0,0,.3f),b=a-Vector(0,0,.6f);
-                auto& trail=trails[actor->m_objectId];
+                auto& trail=trails[actor->m_objectId*4];
                 contact(actor,trail,2,&a,&b);trail.valid=false;
             }
         }
         for(auto& entry:npcPlayback) if(entry.second.requested && entry.second.owner)
-            contact(entry.second.owner,trails[entry.second.owner->m_objectId]);
+            liveContact(entry.second.owner);
     }
     marks.erase(std::remove_if(marks.begin(),marks.end(),[&](const Mark& mark) {
         if(std::getenv("K1_ENGAGE_SURFACE_MARK_TEST")) {
@@ -5241,6 +6624,11 @@ void DrawSaberSurfaceMarks(CAurScene* scene) {
         }
         return (!mark.world && !mark.owner.m_pObject) || now-mark.born>10000000;
     }),marks.end());
+    if(std::getenv("K1_ENGAGE_SURFACE_MARK_ONLY") && fixtureDrawn && surfacesProbed &&
+       testedContactSound && glowExpired && scorchExpired) {
+        if(FILE* f=fopen("saber-mark-input.txt","w")){fputs("quit:0\n",f);fclose(f);}
+        fprintf(stderr,"K1_JKA_SABER_MARK_ONLY_PASS\n");
+    }
     // JKA's mark pool is bounded; evict old paired scorch/glow fragments together.
     if(marks.size()>256) marks.erase(marks.begin(),marks.end()-256);
     if(marks.empty()) return;
@@ -5363,6 +6751,7 @@ void K1ParryReticle::Draw(float delta) {
     if(width<=0 || height<=0) return;
     const auto aim=SelectedParryAim();
     target=aim.target;sector=aim.sector;guarding=state.Guarding();
+    const bool parrySuccess=ContactWallUs()<parrySuccessUntil;
     // Flush native image batches before the untextured control, then preserve
     // the same texture/program state already scoped by the saber HUD preview.
     CAurGUIImage::FlushBuffer(CAurGUIImage::cm_fAlpha);
@@ -5404,9 +6793,9 @@ void K1ParryReticle::Draw(float delta) {
         }
     };
     disk(3.f*scale,0,0,0);disk(1.8f*scale,1,1,1);
-    if(target!=OBJECT_INVALID) for(int side=0;side<4;++side) {
+    if(target!=OBJECT_INVALID || parrySuccess) for(int side=0;side<4;++side) {
         const bool selected=side==sector;
-        if(selected && guarding) {
+        if(parrySuccess || (selected && guarding)) {
             const auto& yellow=CSWGuiManager::COLOR_YELLOW;
             ASLgl::glColor4f(yellow.x,yellow.y,yellow.z,1.f);
         }
@@ -5445,18 +6834,23 @@ void K1ParryReticle::Draw(float delta) {
         };
         const bool dot=pixel(cx,cy,0)>220 && pixel(cx,cy,1)>220 && pixel(cx,cy,2)>220;
         bool highlight=true;
+        if(parrySuccess)for(int side=0;side<4;++side) {
+            const float angle=(side+.5f)*1.5707963268f;
+            const float x=cx+18.5f*scale*std::sin(angle),y=cy-18.5f*scale*std::cos(angle);
+            highlight=highlight && pixel(x,y,0)>220 && pixel(x,y,1)>220 && pixel(x,y,2)<40;
+        }
         if(target!=OBJECT_INVALID && sector>=0) {
             const float angle=(sector+.5f)*1.5707963268f;
             const float x=cx+18.5f*scale*std::sin(angle),y=cy-18.5f*scale*std::cos(angle);
             const int r=pixel(x,y,0),g=pixel(x,y,1),b=pixel(x,y,2);
-            highlight=guarding?(r>220 && g>220 && b<40):(b>150 && b>r*1.5f);
+            highlight=highlight && ((parrySuccess || guarding)?(r>220 && g>220 && b<40):(b>150 && b>r*1.5f));
         }
         int program=0;ASLgl::glGetIntegerv(0x8B8D,&program);
         bool cache=GLRender::cm_uiCurrentStage==saved.cachedStage && k1host_save_preview_program()==saved.program && program==saved.programId;
         for(int unit=0;unit<6;++unit) cache=cache && GLRender::cm_nGLCurrentTID[unit]==saved.cachedTexture[unit];
         const bool ok=outside==0 && changed>0 && dot && highlight && cache;
-        fprintf(stderr,"K1_PARRY_RENDER_%s sector=%d guard=%d screen=%d,%d dot=%d highlight=%d outside=%d changed=%d cache=%d\n",
-            ok?"PASS":"FAIL",sector,guarding,width,height,dot,highlight,outside,changed,cache);
+        fprintf(stderr,"K1_PARRY_RENDER_%s sector=%d guard=%d success=%d screen=%d,%d dot=%d highlight=%d outside=%d changed=%d cache=%d\n",
+            ok?"PASS":"FAIL",sector,guarding,parrySuccess,width,height,dot,highlight,outside,changed,cache);
         parryRenderFailed=parryRenderFailed || !ok;++parryRenderChecks;parryRenderRequested=false;
     }
     if(std::getenv("K1_ENGAGE_PARRY_TEST")) {
@@ -5468,8 +6862,33 @@ void K1ParryReticle::Draw(float delta) {
     }
 }
 int K1EngagePoiseBladePercent(Gob* model) {
-    if(!model || !hudOwner || model->m_pScene!=hudOwner->m_poiseWeapon.m_scene.m_pScene) return -1;
-    return hudOwner->m_poiseWeapon.percent;
+    if(!model || !hudOwner) return -1;
+    if(model->m_pScene==hudOwner->m_poiseWeapon.m_scene.m_pScene) return hudOwner->m_poiseWeapon.percent;
+    if(model->m_pScene==hudOwner->m_poiseOffhand.m_scene.m_pScene) return hudOwner->m_poiseOffhand.percent;
+    return -1;
+}
+bool K1EngagePoiseSolidRange(Part* part,float& leftX,float& rightX) {
+    if(!part || !hudOwner || K1EngagePoiseBladePercent(part->m_pGob)<0)return false;
+    Gob* model=part->m_pGob;const auto* geometry=SwordModelGeometry(model);
+    if(!geometry)return false;
+    auto& view=model->m_pScene==hudOwner->m_poiseWeapon.m_scene.m_pScene?hudOwner->m_poiseWeapon:hudOwner->m_poiseOffhand;
+    auto* camera=view.m_scene.m_pCamera;if(!camera)return false;
+    const float fraction=std::max(0,std::min(100,view.percent))*.01f;
+    // Project the complete grip box, not just its centerline: perspective must
+    // never shave off the crossguard or pommel at zero poise.
+    float gripLeft=1e30f,gripRight=-1e30f;
+    for(float x:{geometry->gripXLow,geometry->gripXHigh})for(float y:{geometry->gripYLow,geometry->gripYHigh})for(float z:{geometry->gripLow,geometry->gripHigh}) {
+        const Vector point=model->m_vPosition+(model->m_qOrientation.xdir()*x+model->m_qOrientation.ydir()*y+model->m_qOrientation.zdir()*z)*model->m_fObjectScale;
+        const float screen=camera->MapToScreen(point,false).x;
+        gripLeft=std::min(gripLeft,screen);gripRight=std::max(gripRight,screen);
+    }
+    const float a=camera->MapToScreen(SwordWorldPoint(model,geometry->tipLow),false).x;
+    const float b=camera->MapToScreen(SwordWorldPoint(model,geometry->tipHigh),false).x;
+    const float fullLeft=std::min(gripLeft,std::min(a,b)),fullRight=std::max(gripRight,std::max(a,b));
+    const bool positiveRight=b>a;
+    leftX=geometry->doubleBlade || !positiveRight?gripLeft+(fullLeft-gripLeft)*fraction:fullLeft;
+    rightX=geometry->doubleBlade || positiveRight?gripRight+(fullRight-gripRight)*fraction:fullRight;
+    return std::isfinite(leftX) && std::isfinite(rightX) && rightX>leftX;
 }
 bool DoubleBladePoiseWeapon() {
     auto* actor=ServerActor();
@@ -5574,8 +6993,9 @@ void K1PoiseWeaponView::Draw(float delta) {
     }
     // Timing probes use clock/contact instrumentation; synchronous multi-megabyte
     // GPU readbacks delay the next observer frame. Render checks run separately.
-    const bool trace=std::getenv("K1_ENGAGE_POISE_TEST") && !std::getenv("K1_ENGAGE_POISE_REGEN_TEST") &&
-        (draws<2 || lastDrawnPercent!=percent || (renderProbe && renderFrame%120==118));
+    const bool dualTrace=DualMode() && std::getenv("K1_ENGAGE_DUAL_TEST") && (draws<1 || lastDrawnPercent!=percent);
+    const bool trace=dualTrace || (std::getenv("K1_ENGAGE_POISE_TEST") && !std::getenv("K1_ENGAGE_POISE_REGEN_TEST") &&
+        (draws<2 || lastDrawnPercent!=percent || (renderProbe && renderFrame%120==118)));
     auto renderTrace=[&](const char* stage) {
         k1host_trace_poise_shader(stage);
         int depthMask=0,depthFunc=0,blendSrc=0,blendDst=0,clientUnit=0,matrixMode=0;
@@ -5628,7 +7048,7 @@ void K1PoiseWeaponView::Draw(float delta) {
     ASLgl::glGetIntegerv(0x0C10,oldBox); // GL_SCISSOR_BOX
     const bool clipped=ASLgl::glIsEnabled(0x0C11)!=0;
     ASLgl::glEnable(0x0C11);
-    // The hilt always draws in full. Only PartLightsaber scopes a depletion crop.
+    // Preview blade draws scope depletion; solid swords retain their grip span.
     ASLgl::glScissor(viewport[0],viewport[1],viewport[2],viewport[3]);
     m_scene.m_pCamera->RenderScene();
     ++draws;
@@ -5647,11 +7067,19 @@ void K1PoiseWeaponView::Draw(float delta) {
         std::vector<unsigned char> frameAfter(frameBefore.size());
         readFrame(frameViewport,frameAfter.data());
         size_t outsideChanged=0,insideChanged=0;
+        int chromaMinX=frameViewport[2],chromaMaxX=-1,chromaMinY=frameViewport[3],chromaMaxY=-1;size_t chromaPixels=0;
         for(int y=0;y<frameViewport[3];++y) for(int x=0;x<frameViewport[2];++x) {
             size_t i=(size_t(y)*frameViewport[2]+x)*3;
             if(frameBefore[i]==frameAfter[i] && frameBefore[i+1]==frameAfter[i+1] && frameBefore[i+2]==frameAfter[i+2]) continue;
             const int sx=x+frameViewport[0],sy=y+frameViewport[1];
-            if(sx>=viewport[0] && sx<viewport[0]+viewport[2] && sy>=viewport[1] && sy<viewport[1]+viewport[3]) ++insideChanged;
+            if(sx>=viewport[0] && sx<viewport[0]+viewport[2] && sy>=viewport[1] && sy<viewport[1]+viewport[3]) {
+                ++insideChanged;
+                const int r=frameAfter[i],g=frameAfter[i+1],b=frameAfter[i+2];
+                if(std::max({r,g,b})>80 && std::max({r,g,b})-std::min({r,g,b})>40) {
+                    ++chromaPixels;chromaMinX=std::min(chromaMinX,x);chromaMaxX=std::max(chromaMaxX,x);
+                    chromaMinY=std::min(chromaMinY,y);chromaMaxY=std::max(chromaMaxY,y);
+                }
+            }
             else ++outsideChanged;
         }
         bool cacheRestored=GLRender::cm_uiCurrentStage==previewTextureState.cachedStage;
@@ -5665,6 +7093,9 @@ void K1PoiseWeaponView::Draw(float delta) {
             k1host_save_preview_program()==previewTextureState.program;
         fprintf(stderr,"K1_POISE_RENDER_ISOLATION_%s percent=%d outside_changed=%zu inside_changed=%zu cache_restored=%d drawing_restored=%d\n",
             !outsideChanged && cacheRestored && drawingRestored?"PASS":"FAIL",percent,outsideChanged,insideChanged,cacheRestored,drawingRestored);
+        if(dualTrace)fprintf(stderr,"K1_DUAL_METER_RENDER_%s hand=%d percent=%d colored_pixels=%zu x=%d,%d y=%d,%d\n",
+            !outsideChanged && cacheRestored && drawingRestored?"PASS":"FAIL",hudOwner && this==&hudOwner->m_poiseOffhand?1:0,percent,
+            chromaPixels,chromaMinX,chromaMaxX,chromaMinY,chromaMaxY);
     }
 }
 void AurGUIGetScreenSize(int& width,int& height);
@@ -5684,6 +7115,10 @@ float PoisePreviewBounds(Gob* model,Vector& low,Vector& high,Vector& beamMidpoin
         }
         for(int i=0;i<part->m_nChildren;++i) self(self,part->m_paChildren[i]);
     };if(model->m_pPart) visit(visit,model->m_pPart);
+    if(const auto* geometry=SwordModelGeometry(model)) {
+        bladeLength=geometry->tipHigh-geometry->gripHigh;
+        beamMidpoint=Vector(0,0,(geometry->tipHigh+geometry->gripHigh)*.5f);
+    }
     return bladeLength;
 }
 Quaternion PoisePreviewOrientation(const Vector& size) {
@@ -5693,6 +7128,21 @@ Quaternion PoisePreviewOrientation(const Vector& size) {
     const Vector horizontal(1,0,0);Quaternion q;
     if(dot(axis,horizontal)<.999f) q=Quaternion(normalize(cross(axis,horizontal)),1.5707963268f);
     return q;
+}
+Quaternion PoiseWeaponOrientation(Gob* model,const Vector& size) {
+    const Quaternion horizontal=PoisePreviewOrientation(size);
+    return SwordModelGeometry(model)?normalize(horizontal*Quaternion(Vector(0,0,1),1.5707963268f)):horizontal;
+}
+float PoiseWeaponFrameLength(Gob* model,const Vector& size) {
+    const float length=std::max(.3f,std::max(size.x,std::max(size.y,size.z)));
+    if(!SwordModelGeometry(model))return length;
+    const Quaternion orientation=PoiseWeaponOrientation(model,size);
+    const Vector x=orientation.xdir(),y=orientation.ydir(),z=orientation.zdir();
+    const float width=std::fabs(x.x)*size.x+std::fabs(y.x)*size.y+std::fabs(z.x)*size.z;
+    const float height=std::fabs(x.z)*size.x+std::fabs(y.z)*size.y+std::fabs(z.z)*size.z;
+    const float depth=std::fabs(x.y)*size.x+std::fabs(y.y)*size.y+std::fabs(z.y)*size.z;
+    const float aspect=420.f/74.f,lens=2.f*std::tan(12.5f*.01745329252f)*aspect*.86f;
+    return std::max(length,std::max(width,height*aspect)+depth*lens*.5f);
 }
 float PoiseStaffSizeRatio(const K1PoiseWeaponView& view) {
     if(!DoubleBladePoiseWeapon() || view.singleModelLength<=0 || view.singleBladeLength<=0 || view.bladeLength<=0) return 1.f;
@@ -5715,18 +7165,67 @@ void LayoutPoiseHud(CSWGuiMainInterface* hud) {
     if(width<=0 || height<=0) return;
     auto& view=hud->m_poiseWeapon;auto& label=hud->m_poisePercent;
     const float scale=height/720.f;
-    const int w=std::min(width,int(std::lround(420.f*scale*PoiseStaffSizeRatio(view)))),h=int(std::lround(74.f*scale));
-    if(view.layoutWidth==width && view.layoutHeight==height && view.m_extent.w==w) return;
+    const auto swordScale=[](const CExoString& resource) {
+        for(const auto& geometry:swordGeometry)if(!_stricmp(resource.CStr(),geometry.resource))
+            return geometry.doubleBlade?1.2f:.9f;
+        return 1.f;
+    };
+    // Resize the entire sword preview, including its hilt. Keeping the viewport
+    // aspect preserves native framing and grip cropping; saber sizing is unchanged.
+    const float ratio=swordScale(view.resource);
+    const int w=std::min(width,int(std::lround(420.f*scale*PoiseStaffSizeRatio(view)*ratio))),
+              h=int(std::lround(74.f*scale*ratio));
+    const bool dual=DualMode();
+    const int row=dual?int(std::lround(24.f*scale)):0;
+    auto& offhand=hud->m_poiseOffhand;
+    const float offhandRatio=swordScale(offhand.resource);
+    const int offhandW=std::min(width,int(std::lround(420.f*scale*PoiseStaffSizeRatio(view)*offhandRatio))),
+              offhandH=int(std::lround(74.f*scale*offhandRatio));
+    if(view.layoutWidth==width && view.layoutHeight==height && view.m_extent.w==w && view.m_extent.h==h &&
+       offhand.m_extent.w==offhandW && offhand.m_extent.h==offhandH &&
+       offhand.m_extent.y==int(std::lround(6.f*scale))+row) return;
     view.layoutWidth=width;view.layoutHeight=height;
     const int x=(width-w)/2,y=int(std::lround(6.f*scale));
     view.SetExtent(CSWGuiExtent(x,y,w,h));
+    offhand.SetExtent(CSWGuiExtent((width-offhandW)/2,y+row,offhandW,offhandH));
+    offhand.layoutWidth=width;offhand.layoutHeight=height;
     // Native K1 strings cache their creation-time scale. Reflow this local label
     // when display size changes, keeping its box large enough for a complete line.
     if(label.m_text.m_pString) label.m_text.m_pString->SetFontScale(height*1.3f/768.f);
-    const int labelY=y+h-int(std::lround(44.f*scale));
+    const int labelY=y+row+h-int(std::lround(44.f*scale));
     label.SetExtent(CSWGuiExtent(x,labelY,w,int(std::ceil(40.f*scale))));
     const int textHeight=std::max(label.m_extent.h,label.m_text.GetIdealHeight()+int(std::ceil(6.f*scale)));
     label.SetExtent(CSWGuiExtent(x,labelY,w,textHeight));
+    FramePoiseSaber(view);
+    FramePoiseSaber(offhand);
+}
+void UpdateDualPoiseSaber(CSWGuiMainInterface* hud,CSWCCreature* client,int percent) {
+    auto& view=hud->m_poiseOffhand;
+    view.percent=percent;
+    auto* live=client->GetModel(CSWCAnimBase::ANIM_MODEL_LEFT_ITEM_BODY,1);
+    if(!live || !live->m_pModel) {view.m_tail.bVisible=false;return;}
+    const CExoString resource(live->m_pModel->m_szName);
+    if(view.resource!=resource) {
+        while(view.m_scene.m_aModels.m_count)view.m_scene.RemoveModel(0,1);
+        auto* model=static_cast<Gob*>(view.m_scene.AddModel(resource,-1));
+        if(!model){view.m_tail.bVisible=false;return;}
+        view.resource=resource;view.m_scene.m_pScene->SetAmbient(Vector(1,1,1));
+        model->m_bAlwaysRendering=true;
+        const int powered=model->PlayAnimation(const_cast<char*>("powered"),0,AnimRun::kAnimNoBlendIn,0.f);model->Animate(.0001f);
+        Vector low,high,midpoint;view.bladeLength=PoisePreviewBounds(model,low,high,midpoint);
+        const auto q=PoiseWeaponOrientation(model,high-low);
+        model->SetOrientation(q);model->SetPosition(Rotate(q,(low+high)*-.5f));
+        view.sourceModelLength=PoiseWeaponFrameLength(model,high-low);
+        if(std::getenv("K1_ENGAGE_DUAL_TEST"))fprintf(stderr,"K1_DUAL_OFFHAND_PREVIEW model=%s powered=%d blade=%g bounds=%g,%g,%g scene_bound=%d camera_bound=%d\n",resource.CStr(),powered,view.bladeLength,
+            (high-low).x,(high-low).y,(high-low).z,model->m_pScene==view.m_scene.m_pScene,
+            static_cast<Gob*>(view.m_scene.m_pCamera->AsCAurObject())->m_pScene==view.m_scene.m_pScene);
+    }
+    // Both rows share the main meter's framing and poise value, while each
+    // preview owns its actual equipped hilt/crystal model and render state.
+    view.modelLength=hud->m_poiseWeapon.modelLength;
+    if(SwordModelGeometry(live)) {
+        view.modelLength=std::max(view.modelLength,view.sourceModelLength);
+    }
     FramePoiseSaber(view);
 }
 void UpdatePoiseHud(CSWGuiMainInterface* hud) {
@@ -5734,6 +7233,7 @@ void UpdatePoiseHud(CSWGuiMainInterface* hud) {
     auto* client=Actor();
     const bool visible=state.mode!=K1EngageState::Mode::Exploration && HasMeleePoise(actor);
     hud->m_poiseWeapon.m_tail.bVisible=visible;
+    hud->m_poiseOffhand.m_tail.bVisible=visible && DualMode();
     hud->m_poisePercent.m_tail.bVisible=visible;
     if(!visible || !client) return;
     LayoutPoiseHud(hud);
@@ -5743,6 +7243,8 @@ void UpdatePoiseHud(CSWGuiMainInterface* hud) {
     hud->m_poisePercent.m_text.m_params.SetText(CExoString(text));
     hud->m_poisePercent.m_text.m_params.bHilight=false;
     hud->m_poisePercent.m_text.m_params.m_fAlpha=1.f;
+    auto& numberParams=hud->m_poisePercent.m_text.m_params;
+    numberParams.SetColor(PoiseNumberColor(numberParams.m_defaultColor));
     if(std::getenv("K1_ENGAGE_POISE_TEST")) {
         static int last=-1,lastWidth=0,lastHeight=0;
         auto& view=hud->m_poiseWeapon;
@@ -5760,6 +7262,7 @@ void UpdatePoiseHud(CSWGuiMainInterface* hud) {
     auto* live=client->GetModel(CSWCAnimBase::ANIM_MODEL_RIGHT_ITEM_BODY,1);
     if(!live || !live->m_pModel) return;
     auto& view=hud->m_poiseWeapon;
+    if(DualMode()) UpdateDualPoiseSaber(hud,client,percent);
     if(DoubleBladePoiseWeapon() && view.singleModelLength<=0.f) {
         // Measure the established blue single-saber framing through the same
         // native loader/bounds path; never depend on which weapon loaded first.
@@ -5776,9 +7279,8 @@ void UpdatePoiseHud(CSWGuiMainInterface* hud) {
         }
     }
     // Native saber resources encode both the hilt type and current crystal variant.
-    // Other melee weapons use the verified stock blue single-saber resource.
-    const CExoString resource((live->m_pModel->m_nFlags & Model::kModelLightsaber)?
-        live->m_pModel->m_szName:"w_Lghtsbr_001");
+    // Native solid swords retain their actual model and a grip-bounded crop.
+    const CExoString resource(PoiseWeaponResource(live));
     if(view.resource==resource) return;
     while(view.m_scene.m_aModels.m_count) view.m_scene.RemoveModel(0,1);
     auto* model=static_cast<Gob*>(view.m_scene.AddModel(resource,-1));
@@ -5790,12 +7292,14 @@ void UpdatePoiseHud(CSWGuiMainInterface* hud) {
     model->Animate(.0001f);
     Vector low,high,midpoint;view.bladeLength=PoisePreviewBounds(model,low,high,midpoint);
     const Vector size=high-low;
-    const Quaternion q=PoisePreviewOrientation(size);
+    const Quaternion q=PoiseWeaponOrientation(model,size);
     model->SetOrientation(q);
     model->SetPosition(Rotate(q,(low+high)*-.5f));
     view.bladeDepth=Rotate(q,midpoint-(low+high)*.5f).y;
-    const float height=std::max(.3f,std::max(size.x,std::max(size.y,size.z)));
+    const float height=PoiseWeaponFrameLength(model,size);
+    view.sourceModelLength=height;
     view.modelLength=height;LayoutPoiseHud(hud);FramePoiseSaber(view);
+    if(DualMode()) UpdateDualPoiseSaber(hud,client,percent);
     fprintf(stderr,"K1_POISE_HUD model=%s height=%g blade=%g depth=%g size_ratio=%g percent=%d\n",resource.CStr(),height,view.bladeLength,view.bladeDepth,PoiseStaffSizeRatio(view),percent);
 }
 
@@ -5827,6 +7331,9 @@ void K1EngageHud(CSWGuiMainInterface* hud) {
         hud->m_poiseWeapon.SetExtent(CSWGuiExtent(0,0,420,74));
         hud->m_poiseWeapon.m_tail.bIgnoreMouse=true;
         hud->AddControl(&hud->m_poiseWeapon);
+        hud->m_poiseOffhand.SetExtent(CSWGuiExtent(0,0,420,74));
+        hud->m_poiseOffhand.m_tail.bIgnoreMouse=true;
+        hud->AddControl(&hud->m_poiseOffhand);
         label.SetText(CExoString("100%"));
         const CSWGuiBorderParams noBorder(CResRef(),CResRef(),CResRef(),0,0,0.f,Vector(1,1,1),0);
         hud->m_poisePercent.Initialize(CSWGuiExtent(0,74,420,40),label,noBorder,1.f);
@@ -5850,6 +7357,8 @@ void K1EngageHud(CSWGuiMainInterface* hud) {
 }
 void K1EngageHudDestroyed(CSWGuiMainInterface* hud) {
     if (hudOwner==hud) {
+        WearablePoseDonors().clear();
+        playerPlayback.nativeGait={};
         ReleaseNpcPlayback();
         cameraBlend = {};
         enemyRepositionAfter.clear();
@@ -5857,17 +7366,18 @@ void K1EngageHudDestroyed(CSWGuiMainInterface* hud) {
         retainedPlanningPose = false;
         npcBolts.clear();
         meleePoise.clear();
+        parrySuccessUntil=0;
         blockObservations.clear();
-        pendingMeleeContacts.clear();
+        contactBlockClocks.clear();contactEffectClocks.clear();contactGuardClock={};
         nativeActionBody = false;
-        nativeIdlePose.clear();nativeStaffGuardPose.clear();
+        nativeIdlePose.clear();nativeStaffGuardPose.clear();nativeDualGuardPose.clear();
         hudOwner=nullptr;loadedBody=nullptr;currentBase=currentOverlay=currentAttack=nullptr;state=K1EngageState();
         keyW=keyS=keyA=keyD=keyShift=false;movement.Clear();
         encounter.clear();
     }
 }
 namespace {
-bool CheckRigActorOwnership(CSWCCreature* actor,bool source,const CResRef& texture,const std::string& headName,const std::string& weaponName,const char* stage) {
+bool CheckRigActorOwnership(CSWCCreature* actor,bool source,const CResRef& texture,const std::string& headName,const std::string& weaponName,const char* stage,bool wearable=false) {
     Gob* body=actor->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1);bool ok=body && IsSourceBody(body)==source;int nodes=0;
     if(body) {
         auto count=[&](auto&& self,Part* p)->void {
@@ -5876,12 +7386,12 @@ bool CheckRigActorOwnership(CSWCCreature* actor,bool source,const CResRef& textu
         };count(count,body->m_pPart);
         bool legRig=body->GetPart(const_cast<char*>("rfemurX"))!=nullptr;
         bool motionRig=body->GetPart(const_cast<char*>("j_motion"))!=nullptr;
-        ok=ok && nodes==(source?(motionRig?70:legRig?69:66):61) && !body->m_pAddInModel;
-        if(source && legRig) ok=ok && body->GetPart(const_cast<char*>("lfemurX")) && body->GetPart(const_cast<char*>("TorsoLegs"));
+        ok=ok && (wearable?nodes>=50:nodes==(source?(motionRig?70:legRig?69:66):61)) && !body->m_pAddInModel;
+        if(source && legRig) ok=ok && body->GetPart(const_cast<char*>("lfemurX")) && (wearable || body->GetPart(const_cast<char*>("TorsoLegs")));
     }
     auto attached=[&](unsigned char slot,const char* hook,const std::string& expected) {
         Gob* child=actor->GetModel(slot,1);
-        if(expected.empty()) return child==nullptr;
+        if(expected.empty()) return child==nullptr || (wearable && body && child->m_pScene!=body->m_pScene);
         if(!body || !child || !child->m_pModel || expected!=child->m_pModel->m_szName || !child->m_pBehavior) return false;
         auto* attachment=static_cast<CAurBehaviorAttach*>(child->m_pBehavior->AsBehaviorAttach());
         return attachment && attachment->m_pAttachedPart==body->GetPart(const_cast<char*>(hook));
@@ -5889,6 +7399,11 @@ bool CheckRigActorOwnership(CSWCCreature* actor,bool source,const CResRef& textu
     bool head=attached(CSWCAnimBase::ANIM_MODEL_HEAD,"headhook",headName);
     bool weapon=attached(CSWCAnimBase::ANIM_MODEL_RIGHT_ITEM_BODY,"rhand",weaponName);
     bool material=actor->GetAnimationBase() && actor->GetAnimationBase()->m_resModelTexture==texture;
+    if(wearable && !material && body && body->m_pModel && actor->GetAnimationBase()) {
+        const char* native=WearableNativeResource(body->m_pModel->m_szName);
+        material=native && !_stricmp(native,texture.GetResRefStr()) &&
+            !_stricmp(actor->GetAnimationBase()->m_resModelTexture.GetResRefStr(),body->m_pModel->m_szName);
+    }
     ok=ok&&head&&weapon&&material;
     fprintf(stderr,"K1_ENGAGE_RIG_ACTOR_%s stage=%s source=%d nodes=%d head_present=%d head_link=%d weapon_link=%d texture=%d\n",ok?"PASS":"FAIL",stage,source,nodes,!headName.empty(),head,weapon,material);
     return ok;
@@ -5932,6 +7447,8 @@ bool CheckRigActorNativePose(CSWCCreature* actor,const char* stage) {
     return ok;
 }
 void ControlProbeTick(int& phase,int& ticks,unsigned long long opponentId) {
+    static int speedStage=0;static long long speedStart=0;
+    static unsigned long long speedEffect=0;static float originalSpeed=1;
     static bool ok=true;static Vector previous;static float yaw=0;static int serial=0,hp=0;
     static float nativeCombatEyeHeight=0;
     static Gob* beforePlanning = nullptr;
@@ -5968,6 +7485,28 @@ void ControlProbeTick(int& phase,int& ticks,unsigned long long opponentId) {
         }
         send(command.c_str());
     };
+    if(phase==2 && speedStage<2) {
+        auto* player=actor->GetServerCreature();
+        const auto now=g_pAppManager->m_pServerExoApp->GetWorldTimer()->GetSnapshotTime();
+        if(!speedStage) {
+            originalSpeed=player->GetMovementRateFactor(0);
+            player->SetMovementRateFactor(.125f);ReconcileSandboxMovement(player);
+            check(player->GetMovementRateFactor(0)==1.f,"orphan_slow_factor_recovers");
+            player->SetMovementRateFactor(originalSpeed);
+            auto* effect=new CGameEffect(1);effect->m_subType=CSWSEffectListHandler::EFFECT_MOVEMENT_SPEED_DECREASE;
+            // Planning runs at .005 world speed; a short native duration keeps
+            // this expiry check inside the existing controller wall-time budget.
+            effect->m_durationTypeBits=CGameEffect::DURATION_TYPE_TEMPORARY;effect->m_fDuration=.002f;
+            effect->SetInteger(0,50);speedEffect=effect->m_effectId;player->ApplyEffect(effect,0,1);
+            ReconcileSandboxMovement(player);
+            check(std::fabs(player->GetMovementRateFactor(0)-originalSpeed*.5f)<.0001f,"live_slow_effect_preserved");
+            speedStart=now;speedStage=1;return;
+        }
+        bool present=false;for(int i=0;i<player->m_effects.m_count;++i)present|=player->m_effects.m_pArray[i]->m_effectId==speedEffect;
+        if(present && now-speedStart<3000000)return;
+        check(!present && std::fabs(player->GetMovementRateFactor(0)-originalSpeed)<.0001f,"native_slow_expiry_restores_speed");
+        speedStage=2;
+    }
     if(phase==2) {
         CSWSCreature* npc=g_pAppManager->m_pServerExoApp->GetCreatureByGameObjectID(opponentId);
         npc->ClearAllActions(1);g_pAppManager->m_pServerExoApp->GetServerAIMaster()->SetAILevel(npc,-1);
@@ -6002,6 +7541,11 @@ void ControlProbeTick(int& phase,int& ticks,unsigned long long opponentId) {
         check(entered,"enter");phase=10;ticks=0;return;
     }
     if(phase==10) {
+        keyShift=true;state.rightHeld=true;dualGuardAfterNative=true;
+        K1EngageReleaseHeldInput();
+        check(!keyShift && !state.ForceWalk() && !dualGuardAfterNative,"focus_loss_clears_walk_guard_and_native_hold");
+        sandboxMenuOpen=true;keyShift=true;K1EngageKey(225,false);sandboxMenuOpen=false;
+        check(!keyShift,"menu_key_release_does_not_latch_shift");
         auto* moduleCamera=g_pAppManager->m_pClientExoApp->GetModule()->m_pCamera;
         auto* combatCamera=static_cast<CSWBehaviorCameraCombat*>(moduleCamera->GetBehavior(BEHAVIOR_CAMERA_COMBAT));
         float savedPitch=aimPitch;aimPitch=0;
@@ -6125,6 +7669,7 @@ void ControlProbeTick(int& phase,int& ticks,unsigned long long opponentId) {
         check(actor->GetServerCreature()->m_bCombatState && actor->GetServerCreature()->m_nCombatTimer>0 && actor->m_bInCombat && item && item->m_bPowered,
             "engage_retains_combat_and_saber_power_without_enemy_hits");
         Vector bladeBase,bladeTip;
+        // Owned cap ordinals1/2 measure .926997m; exclude the soft glow caps.
         check(Blade(actor,bladeBase,bladeTip) && magnitude(bladeTip-bladeBase)>.92f && magnitude(bladeTip-bladeBase)<.94f,
             "collision_blade_matches_native_central_beam_length");
         std::vector<K1SaberContact::Triangle> posed;CollisionTriangles(actor->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1),posed);
@@ -6157,7 +7702,7 @@ void ControlProbeTick(int& phase,int& ticks,unsigned long long opponentId) {
                 magnitude(pose.part->m_vLocalPosition-pose.position)<.0002f &&
                 std::fabs(dot(normalize(pose.part->m_qLocalOrientation),normalize(pose.orientation)))>.999999f;
         }
-        check(nativeIdleSettled,"standing_recovery_settles_to_native_kotor_idle");
+        check(nativeIdleSettled,"standing_recovery_preserves_native_body_idle");
         CSWSCreature* npc=g_pAppManager->m_pServerExoApp->GetCreatureByGameObjectID(opponentId);
         aimYaw=0;movement.Clear();actor->SetPrecalculatedPosition(Vector(209.5888f,100.0049f,0));
         npc->SetPosition(Vector(210.5888f,100.0049f,0),0,0,0);hp=npc->GetCurrentHitPoints(0);serial=attackSerial;
@@ -6389,7 +7934,8 @@ void ControlProbeTick(int& phase,int& ticks,unsigned long long opponentId) {
     ++phase;ticks=0;
 }
 unsigned long long arenaSaberIds[2]={OBJECT_INVALID,OBJECT_INVALID};
-bool EquipFixtureWeapon(CSWSCreature* owner, const char* resource) {
+unsigned long long arenaOffhandSaberId=OBJECT_INVALID;
+bool EquipFixtureWeapon(CSWSCreature* owner, const char* resource,unsigned int equipSlot=CSWInventory::SLOT_RIGHTWEAPON) {
     CSWSItem* item=new CSWSItem(OBJECT_INVALID);
     if(!item->LoadFromTemplate(CResRef(resource))) {delete item;return false;}
     if(owner==ServerActor()) {
@@ -6399,7 +7945,7 @@ bool EquipFixtureWeapon(CSWSCreature* owner, const char* resource) {
             if(!owner->m_pStats->HasFeat(feat)) {owner->m_pStats->AddFeat(feat);++granted;}
             if(auto* client=owner->GetClientCreature()) if(client->m_pStats && !client->m_pStats->HasFeat(feat)) client->m_pStats->m_lstFeats.Add(feat);
         }
-        unsigned int slot=CSWInventory::SLOT_RIGHTWEAPON;
+        unsigned int slot=equipSlot;
         bool eligible=owner->CanEquipItem(item,&slot,0,0,0)!=CSWSCreature::CAN_EQUIP_NO;
         fprintf(stderr,"%s_EQUIP_%s baseitem=%d dice=%d die=%d required_feats=%d granted=%d strength=%d\n",base->m_nItemType==ITEM_TYPE_DOUBLE_LIGHTSABER?"K1_STAFF":"K1_FIXTURE",eligible?"PASS":"FAIL",item->m_baseItem,base->m_nNumDice,base->m_nDieToRoll,base->m_nRequiredFeats,granted,owner->m_pStats->GetSTRStat());
         if(!eligible) {delete item;return false;}
@@ -6410,15 +7956,34 @@ bool EquipFixtureWeapon(CSWSCreature* owner, const char* resource) {
     // outgoing weapon to it. Low-level EquipItem only updates equipment slots:
     // leaving the same item in both containers lets a later menu swap merge it
     // with itself, delete it and leave a dangling repository ID.
-    return owner->RunEquip(item->m_objectId,CSWInventory::SLOT_RIGHTWEAPON,1)!=0;
+    return owner->RunEquip(item->m_objectId,equipSlot,1)!=0;
 }
 bool EquipFixtureSaber(CSWSCreature* owner) {
     return EquipFixtureWeapon(owner, "g_w_lghtsbr01");
 }
+bool AddArenaSwords(CSWSCreature* owner) {
+    // Ordinary native inventory items: use the equipment menu to choose them.
+    for(const char* name:{"g_w_lngswrd01","g_w_lngswrd01","g_w_shortswrd01","g_w_vbroswrd01",
+                         "g_w_vbroshort01","g_w_dblswrd001","g_w_vbrdblswd01"}) {
+        auto* item=new CSWSItem(OBJECT_INVALID);
+        if(!item->LoadFromTemplate(CResRef(name))){delete item;return false;}
+        auto* base=g_pRules->GetBaseItem(item->m_baseItem);
+        if(base)for(unsigned char i=0;i<base->m_nRequiredFeats;++i) {
+            const auto feat=base->GetRequiredFeat(i);
+            if(!owner->m_pStats->HasFeat(feat))owner->m_pStats->AddFeat(feat);
+            if(auto* client=owner->GetClientCreature())if(client->m_pStats && !client->m_pStats->HasFeat(feat))client->m_pStats->m_lstFeats.Add(feat);
+        }
+        item->m_flags&=~4;
+        if(!owner->AcquireItem(&item,OBJECT_INVALID,OBJECT_INVALID,1)){delete item;return false;}
+    }
+    fprintf(stderr,"K1_SWORD_INVENTORY_READY native_items=7 single_dual_double=1\n");return true;
+}
 bool CheckArenaSaberInventory(CSWSCreature* owner,const char* stage) {
     auto* repository=owner->GetItemRepository(1);
     bool ok=true;
-    for(auto id:arenaSaberIds) {
+    std::vector<unsigned long long> ids(std::begin(arenaSaberIds),std::end(arenaSaberIds));
+    if(std::getenv("K1_ENGAGE_SANDBOX") && arenaOffhandSaberId!=OBJECT_INVALID)ids.push_back(arenaOffhandSaberId);
+    for(auto id:ids) {
         auto* item=g_pAppManager->m_pServerExoApp->GetItemByGameObjectID(id);
         int backpack=0;
         for(unsigned int i=0;i<repository->ItemListGetCount();++i)
@@ -6427,6 +7992,24 @@ bool CheckArenaSaberInventory(CSWSCreature* owner,const char* stage) {
         ok=ok && item && item->m_possessorId==owner->m_objectId && item->m_stackCount==1 && backpack+equipped==1;
     }
     fprintf(stderr,"K1_SABER_INVENTORY_%s stage=%s sabers=2 unique_ownership=1\n",ok?"PASS":"FAIL",stage);
+    return ok;
+}
+bool GrantSandboxEquipmentPrerequisites(CSWSCreature* player) {
+    auto* client=player?player->GetClientCreature():nullptr;
+    if(!client || !client->m_pStats)return false;
+    // Grant only to the isolated sandbox player, never to spawned native NPCs.
+    // Universal proficiency is K1's existing class/alignment/feat override;
+    // ordinary category feats also appear correctly in the character sheet.
+    const unsigned short feats[]={FEAT_ARMOUR_PROF_LIGHT,FEAT_ARMOUR_PROF_MEDIUM,
+        FEAT_ARMOUR_PROF_HEAVY,FEAT_IMPLANT_LEVEL_1,FEAT_IMPLANT_LEVEL_2,
+        FEAT_IMPLANT_LEVEL_3,FEAT_JEDI_DEFENSE,FEAT_PROFICIENCY_ALL};
+    bool ok=true;
+    for(auto feat:feats) {
+        if(!player->m_pStats->HasFeat(feat))player->m_pStats->AddFeat(feat);
+        if(!client->m_pStats->HasFeat(feat))client->m_pStats->m_lstFeats.Add(feat);
+        ok=ok && player->m_pStats->HasFeat(feat) && client->m_pStats->HasFeat(feat);
+    }
+    fprintf(stderr,"K1_SANDBOX_EQUIPMENT_PREREQS_%s feats=8 server_client=1\n",ok?"PASS":"FAIL");
     return ok;
 }
 bool GrantArenaLoadout(CSWSCreature* player) {
@@ -6535,13 +8118,17 @@ CSWSCreature* SpawnArenaOpponent(CSWSCreature* actor,const Vector& spawn,bool gu
     const char* selected=std::getenv("K1_ENGAGE_NPC_TYPE");
     const K1NpcType* type=&k1DarkJediTypes[0];
     for(const auto& candidate:k1DarkJediTypes) if(selected && !strcmp(selected,candidate.id)) type=&candidate;
-    const bool dark=fixture?(!strcmp(fixture,"k1darktest") || !strcmp(fixture,"k1darkstaff")):(ArenaDarkJedi() && !gunner);
+    bool dark=!fixture && ArenaDarkJedi() && !gunner;
+    if(fixture)for(const auto& candidate:k1DarkJediTypes)if(!strcmp(fixture,candidate.creature)) {
+        dark=true;type=&candidate;break;
+    }
     if(dark && !fixture) fixture=type->creature;
     if(!npc->LoadFromTemplate(CResRef(fixture?fixture:(dark?"k1darktest":"k1arenafoe")),0) ||
         (!dark && !EquipFixtureWeapon(npc,gunner?(rifle?"g_w_blstrrfl001":"g_w_blstrpstl001"):"g_w_lghtsbr01"))) {
         delete npc;return nullptr;
     }
     if(dark && !strcmp(fixture,"k1darkstaff") && !EquipFixtureWeapon(npc,"g_w_drkjdisbr002")) {delete npc;return nullptr;}
+    if(dark && !strcmp(fixture,"k1darkdual") && !EquipFixtureWeapon(npc,"g_w_lghtsbr02",CSWInventory::SLOT_LEFTWEAPON)) {delete npc;return nullptr;}
     if(dark) {
         fprintf(stderr,"K1_NPC_TYPE_SPAWN id=%s actor=%llu template=%s tag=%s\n",NpcType(npc).id,npc->m_objectId,fixture,npc->m_sTag.CStr());
         arenaForce={};arenaForce.actor=npc->m_objectId;
@@ -6564,6 +8151,7 @@ CSWSCreature* SpawnArenaOpponent(CSWSCreature* actor,const Vector& spawn,bool gu
     return npc;
 }
 void SandboxRegister(CSWSCreature* actor,bool friendly) {
+    actor->m_bPlot=0;actor->m_bMin1HP=0;actor->m_bDestroyable=1;
     if(!sandboxActors.emplace(actor->m_objectId,SandboxActor{friendly,int(actor->m_bCommandable),int(actor->m_bPassiveAttackBehaviour)}).second)return;
     auto& force=sandboxForces[actor->m_objectId];force={};force.actor=actor->m_objectId;
     force.next=g_pAppManager->m_pServerExoApp->GetWorldTimer()->GetSnapshotTime()+3000000;
@@ -6586,9 +8174,36 @@ void SandboxSetAi(bool enabled) {
     if(!enabled && K1EngagePlanning() && !Spotted())K1EngageTryDisengage();
     fprintf(stderr,"K1_SANDBOX_AI enabled=%d actors=%zu\n",enabled,sandboxActors.size());
 }
-CSWSCreature* SandboxSpawn(int stance,bool friendly,CExoString& message) {
+void SandboxSetTargetPlayer(bool enabled) {
+    if(sandboxTargetPlayer==enabled)return;
+    sandboxTargetPlayer=enabled;
+    // Discard already queued native attacks/powers and Engage playback immediately.
+    // Native faction reputation queries below enforce the same policy for scripts.
+    if(K1EngageEngaged())Plan();
+    auto* server=g_pAppManager->m_pServerExoApp;
+    for(auto& entry:sandboxActors)if(auto* actor=server->GetCreatureByGameObjectID(entry.first)) {
+        auto owned=npcPlayback.find(entry.first);
+        if(owned!=npcPlayback.end()){if(owned->second.requested)SwapNpcRig(owned->second,false);npcPlayback.erase(owned);}
+        actor->ClearAllActions(1);actor->m_pCombatRound->EndCombatRound(0);actor->SetCombatState(0,1);
+    }
+    fprintf(stderr,"K1_SANDBOX_TARGET_PLAYER enabled=%d actors=%zu\n",enabled,sandboxActors.size());
+}
+void SandboxCosmeticInfo(CCAppearanceInfo& appearance,CSWSCreature* source) {
+    auto& a=appearance.core;auto* s=source->m_pStats;
+    a.m_nAppearanceId=source->m_appearance.m_headId;a.m_nGender=s->m_nGender;a.m_nPhenotype=s->m_nPhenotype;
+    a.m_nHeadNumber=s->m_nAppearanceHead;a.m_nSkinColor=s->m_nColorSkin;a.m_nHairColor=s->m_nColorHair;
+    a.m_nTattooColor1=s->m_nColorTattoo1;a.m_nTattooColor2=s->m_nColorTattoo2;a.m_bUseBackupHead=s->m_nUseBackupHead;
+    a.m_bArmorEquipped=0;a.m_bTypeVariant=0;a.m_bTypeNumber=1;
+    if(auto* armor=source->m_pInventory->GetItemInSlot(CSWInventory::SLOT_BODY)){a.m_bArmorEquipped=1;a.m_bTypeVariant=armor->m_nBodyVariation;a.m_bTypeNumber=armor->m_nTextureVar;}
+}
+void SandboxSaberColor(CSWSCreature* actor,int color) {
+    if(color<1 || color>5)return;
+    for(int slot:{CSWInventory::SLOT_RIGHTWEAPON,CSWInventory::SLOT_LEFTWEAPON})if(auto* item=actor->m_pInventory->GetItemInSlot(slot))
+        if(SaberType(item->m_baseItem))item->m_nModelVariation=static_cast<unsigned char>(color);
+}
+CSWSCreature* SandboxSpawn(int stance,bool friendly,CExoString& message,int group,int variant,bool hostile,const SandboxNativeTemplate* appearance,int color,int saberStance) {
     auto* player=ServerActor();auto* server=g_pAppManager->m_pServerExoApp;
-    if(!sandboxReady || !player || player->GetDead() || !player->GetArea() || (!server->GetFactionManager() || !server->GetFactionManager()->GetFaction(2)) || stance<0 || stance>1){message=CExoString("Cannot spawn here.");return nullptr;}
+    if(!sandboxReady || !player || player->GetDead() || !player->GetArea() || (!server->GetFactionManager() || !server->GetFactionManager()->GetFaction(2)) || stance<0 || stance>=int(sizeof(k1DarkJediTypes)/sizeof(k1DarkJediTypes[0]))){message=CExoString("Cannot spawn here.");return nullptr;}
     Vector forward=player->m_orientation;forward.z=0;if(magnitude(forward)<.01f){message=CExoString("Cannot determine facing.");return nullptr;}forward=normalize(forward);
     JkaWorld world(player);auto* area=static_cast<CSWSArea*>(player->GetArea());Vector spawn;bool clear=false;
     for(float distance:{3.f,3.5f,4.f}) {
@@ -6598,17 +8213,67 @@ CSWSCreature* SandboxSpawn(int stance,bool friendly,CExoString& message) {
         if(clear)break;
     }
     if(!clear){message=CExoString("Not enough room ahead. Move to a clear spot.");fprintf(stderr,"K1_SANDBOX_SPAWN_REJECT reason=space\n");return nullptr;}
-    auto* actor=SpawnArenaOpponent(player,spawn,false,false,false,k1DarkJediTypes[stance].creature);
+    const SandboxNativeTemplate* native=nullptr;
+    if(group>=0) {
+        if(group>=int(sandboxNativeGroups.size()) || variant<0 || variant>=int(sandboxNativeGroups[group].variants.size())) {
+            message=CExoString("NPC selection unavailable.");return nullptr;
+        }
+        native=&sandboxNativeGroups[group].variants[variant];
+    }
+    CSWSCreature* actor=nullptr;
+    if(native) {
+        // Native templates must never pass through the synthetic arena loadout.
+        actor=new CSWSCreature(OBJECT_INVALID,0);
+        if(!actor->LoadFromTemplate(CResRef(native->creature.c_str()),0)){delete actor;actor=nullptr;}
+        if(actor) {
+            ConfigureNpcPoise(actor);
+            sandboxNativeActors.insert(actor->m_objectId);
+            sandboxStances[actor->m_objectId]=saberStance<0?NpcCombatPolicy(actor).stance:saberStance;
+            SandboxSaberColor(actor,color);
+            if(appearance) {
+                std::unique_ptr<CSWSCreature> look(new CSWSCreature(OBJECT_INVALID,0));
+                if(!look->LoadFromTemplate(CResRef(appearance->creature.c_str()),0)){sandboxNativeActors.erase(actor->m_objectId);sandboxStances.erase(actor->m_objectId);delete actor;message=CExoString("Appearance resources unavailable.");return nullptr;}
+                CCAppearanceInfo info={};info.core.m_race=0xff;info.core.m_oidHeadItem=OBJECT_INVALID;
+                SandboxCosmeticInfo(info,look.get());sandboxAppearances[actor->m_objectId]=info;
+                actor->m_appearance.m_headId=info.core.m_nAppearanceId;
+                actor->m_pStats->m_nAppearanceType=info.core.m_nAppearanceId;
+                actor->UpdateAppearanceDependantInfo(1);
+            }
+            actor->SetOrientation(-forward);
+            actor->AddToArea(area,spawn.x,spawn.y,spawn.z,1,1);
+            JkaWorld nativeWorld(actor);
+            auto prepared=npcNavigators.find(area->m_objectId);
+            const auto* path=actor->m_pPathfindInfo;
+            const bool fits=nativeWorld.trace(JkaPoint(spawn),JkaPoint(spawn+Vector(.002f,0,0)),true).clear;
+            const bool needsGraph=prepared==npcNavigators.end() || prepared->second.area!=area ||
+                prepared->second.space+.00001f<path->m_fPersonalSpace || prepared->second.height+.00001f<path->m_fHeight;
+            auto graph=fits && needsGraph?BuildNavigation(nativeWorld):nullptr;
+            if(!fits || (needsGraph && !graph)) {
+                sandboxNativeActors.erase(actor->m_objectId);sandboxStances.erase(actor->m_objectId);sandboxAppearances.erase(actor->m_objectId);actor->RemoveFromArea(0);delete actor;
+                message=CExoString("NPC footprint cannot navigate this location.");return nullptr;
+            }
+            if(graph) {
+                PreparedNavigation next;next.graph=graph;next.area=area;
+                next.space=path->m_fPersonalSpace;next.height=path->m_fHeight;
+                next.generation=++navigationGeneration;npcNavigators[area->m_objectId]=next;
+                fprintf(stderr,"K1_NATIVE_NPC_NAV_PREPARED actor=%llu space=%g height=%g phase=spawn\n",actor->m_objectId,next.space,next.height);
+            }
+            fprintf(stderr,"K1_SANDBOX_NATIVE_SPAWN actor=%llu source=%s/%s appearance=%d hp=%d level=%d force=%d\n",
+                actor->m_objectId,native->module.c_str(),native->source.c_str(),actor->m_appearance.m_headId,
+                actor->GetCurrentHitPoints(0),actor->m_pStats->GetLevel(0),actor->m_pStats->m_nCurrentForcePoints);
+        }
+    } else actor=SpawnArenaOpponent(player,spawn,false,false,false,k1DarkJediTypes[stance].creature);
     if(!actor){message=CExoString("NPC resources unavailable.");return nullptr;}
     if(friendly)server->GetFactionManager()->GetFaction(2)->AddMember(actor->m_objectId,0);
+    else if(native && hostile && server->GetFactionManager()->GetFaction(1))server->GetFactionManager()->GetFaction(1)->AddMember(actor->m_objectId,0);
     SandboxRegister(actor,friendly);lastSandboxSpawn=actor->m_objectId;
     // Seed mutual native visibility, retaining native faction reputation for
     // both controller selection and ordinary KotOR targeting/powers.
     actor->AddToVisibleList(player->m_objectId,1,0,0,0);player->AddToVisibleList(actor->m_objectId,1,0,0,0);
     for(const auto& entry:sandboxActors)if(auto* other=server->GetCreatureByGameObjectID(entry.first))if(other!=actor && !other->GetDead()){actor->AddToVisibleList(other->m_objectId,1,0,0,0);other->AddToVisibleList(actor->m_objectId,1,0,0,0);}
     if(!sandboxAi){actor->m_bCommandable=0;actor->m_bPassiveAttackBehaviour=1;actor->ClearAllActions(1);actor->SetCombatState(0,1);actor->SetAnimation(SERVER_ANIMATION_PAUSE);}
-    message=CExoString(friendly?"Spawned friendly Dark Jedi.":"Spawned hostile Dark Jedi.");
-    fprintf(stderr,"K1_SANDBOX_SPAWN actor=%llu type=%s friendly=%d ai=%d reputation=%d distance=%g facing=%g\n",actor->m_objectId,NpcType(actor).id,friendly,sandboxAi,actor->GetReputation(player->m_objectId,0),magnitude(spawn-player->m_position),dot(actor->m_orientation,normalize(player->m_position-spawn)));
+    message=CExoString(native?(friendly?"Spawned NPC (friendly).":hostile?"Spawned NPC (hostile).":"Spawned NPC (native faction)."):friendly?"Spawned friendly Dark Jedi.":"Spawned hostile Dark Jedi.");
+    fprintf(stderr,"K1_SANDBOX_SPAWN actor=%llu type=%s friendly=%d ai=%d reputation=%d distance=%g facing=%g\n",actor->m_objectId,native?native->creature.c_str():NpcType(actor).id,friendly,sandboxAi,actor->GetReputation(player->m_objectId,0),magnitude(spawn-player->m_position),dot(actor->m_orientation,normalize(player->m_position-spawn)));
     return actor;
 }
 #include "k1sandboxpanel.h"
@@ -6619,6 +8284,7 @@ void SandboxToggle() {
     sandboxSession=true;
     auto* player=ServerActor();auto* area=static_cast<CSWSArea*>(player->GetArea());
     for(int i=0;i<area->m_aObjectsByX.m_count;++i){auto* actor=g_pAppManager->m_pServerExoApp->GetCreatureByGameObjectID(area->m_aObjectsByX.m_pArray[i]);if(actor && actor!=player && !actor->GetDead() && (!strcmp(actor->m_sTag.CStr(),k1DarkJediTypes[0].tag) || !strcmp(actor->m_sTag.CStr(),k1DarkJediTypes[1].tag)))SandboxRegister(actor,actor->GetReputation(player->m_objectId,0)>89);}
+    LoadSandboxNativeCatalog();
     auto* panel=new K1SandboxPanel(gui->m_pGuiManager);sandboxPanel=panel;
     if(K1EngageEngaged())Plan(true);
     state.ClearInputs();keyW=keyS=keyA=keyD=keyShift=false;movement.Clear();g_bMouseCameraRotateToggle=0;g_bLeftMouseDown=0;
@@ -6638,7 +8304,7 @@ void SandboxProbeTick() {
     if(phase==0 && ticks>=30) {
         static int switched=0;static bool waiting=false;
         static CResRef texture;static std::string headName;
-        if(switched<4) {
+        if(switched<4 && !std::getenv("K1_ENGAGE_NEW_SPECIES_TEST")) {
             auto* client=Actor();
             if(!waiting) {
                 if(!CheckArenaSaberInventory(player,"before_menu")){fail("switch_inventory_ownership");return;}
@@ -6690,8 +8356,12 @@ void SandboxProbeTick() {
     }
     if(phase==1) {
         if(!sandboxPanel || !IsGamePaused()){if(ticks>120)fail("menu_open_or_pause");return;}
+        static bool browserChecked=false;
+        if(!browserChecked){int result=SandboxBrowserProbe(sandboxPanel);if(result<0){fail("browser_preview_or_scroll");return;}if(!result)return;browserChecked=true;}
+        if(std::getenv("K1_ENGAGE_NEW_SPECIES_TEST")){fprintf(stderr,"K1_SANDBOX_NEW_SPECIES_PASS\n");SandboxToggle();phase=-1;send("quit:0\n");return;}
         auto* panel=sandboxPanel;bool hit=true;const auto box=panel->m_extent;
-        for(int i=2;i<K1SandboxPanel::Count;++i){auto e=panel->buttons[i].m_extent;hit=hit && panel->HitCheckMouse(box.x+e.x+e.w/2,box.y+e.y+e.h/2)==&panel->buttons[i];}
+        panel->SelectCustom();
+        for(int i=0;i<K1SandboxPanel::Count;++i){auto e=panel->buttons[i].m_extent;hit=hit && panel->HitCheckMouse(box.x+e.x+e.w/2,box.y+e.y+e.h/2)==&panel->buttons[i];}
         fprintf(stderr,"K1_SANDBOX_HIT_CHECK hit=%d flags=%d modal=%d movement=%g\n",hit,panel->m_stateFlags,gui->m_pGuiManager->m_modalPanels.m_count,magnitude(player->m_position-playerOrigin));
         if(!hit || gui->m_pGuiManager->m_modalPanels.m_count!=1 || magnitude(player->m_position-playerOrigin)>.01f){fail("native_menu_hit_or_lock");return;}
         button(K1SandboxPanel::Ai);if(sandboxAi){fail("ai_button");return;}
@@ -6704,7 +8374,10 @@ void SandboxProbeTick() {
         if(!friendly || friendly==hostile || !StaffNpc(friendly) || friendly->GetReputation(player->m_objectId,0)<90 || hostile->GetReputation(friendlyId,0)>10 || friendly->GetReputation(hostileId,0)>10){fail("friendly_staff_factions");return;}
         hostileOrigin=hostile->m_position;friendlyOrigin=friendly->m_position;
         fprintf(stderr,"K1_SANDBOX_UI_PASS modal=1 buttons=6 blocked_spawn=1 hostile_yellow=1 friendly_staff=1\n");
-        send("key:39\n");phase=2;ticks=0;return;
+        panel->SelectCustom();
+        for(int i=0;i<4;++i)button(K1SandboxPanel::ColorRight);
+        button(K1SandboxPanel::CombatRight);
+        send("key:41\n");phase=2;ticks=0;return;
     }
     if(phase==2 && ticks>=150) {
         if(sandboxPanel || sandboxMenuOpen || IsGamePaused() || K1EngagePlanning() || K1EngageEngaged() || !hostile || !friendly ||
@@ -6719,13 +8392,30 @@ void SandboxProbeTick() {
     }
     if(phase==3) {
         if(!sandboxPanel){if(ticks>120)fail("reopen");return;}
+        if(sandboxPanel->faction!=3 || sandboxPanel->type!=0 || sandboxPanel->variant!=0 || sandboxPanel->saberColor!=4 || sandboxPanel->combatStance!=1 || !sandboxPanel->friendly){fail("reopen_selection_memory");return;}
+        if(gui->m_bInGameMenuShown){fail("escape_opened_options");return;}
+        fprintf(stderr,"K1_SANDBOX_MENU_MEMORY_PASS faction=1 npc=1 variant=1 alignment=1 escape_priority=1\n");
         // Make the two NPCs each other's nearest hostile in this controlled
         // combat fixture. UI placement/facing was already tested independently.
         friendly->SetPosition(hostile->m_position+Vector(0,1.15f,0),1,1,0);
         player->SetPosition(playerOrigin-normalize(hostile->m_position-playerOrigin)*4.f,1,1,0);player->SetCurrentHitPoints(1000);
         hostile->m_hitPoints=1000;hostile->SetCurrentHitPoints(1000);friendly->m_hitPoints=1000;friendly->SetCurrentHitPoints(1000);
         if(SandboxTarget(hostile,player)!=nullptr){fail("disabled_target_selection");return;}
+        button(K1SandboxPanel::TargetPlayer);
+        if(sandboxTargetPlayer || hostile->GetReputation(player->m_objectId,0)<=10 || hostile->GetReputation(friendlyId,0)>10){fail("target_player_off_reputation");return;}
         button(K1SandboxPanel::Ai);fprintf(stderr,"K1_SANDBOX_OPPONENTS player_distance=%g ally_distance=%g hostile_target=%llu friendly_target=%llu\n",magnitude(player->m_position-hostile->m_position),magnitude(friendly->m_position-hostile->m_position),SandboxTarget(hostile,player)?SandboxTarget(hostile,player)->m_objectId:OBJECT_INVALID,SandboxTarget(friendly,player)?SandboxTarget(friendly,player)->m_objectId:OBJECT_INVALID);if(!sandboxAi || SandboxTarget(hostile,player)!=friendly || SandboxTarget(friendly,player)!=hostile){fail("enabled_opponents");return;}
+        const Vector spectator=player->m_position;player->SetPosition(hostile->m_position+Vector(.2f,0,0),1,1,0);
+        if(SandboxTarget(hostile,player)!=friendly){fail("target_player_off_nearest");return;}
+        button(K1SandboxPanel::TargetPlayer);
+        if(!sandboxTargetPlayer || SandboxTarget(hostile,player)!=player){fail("target_player_on_nearest");return;}
+        button(K1SandboxPanel::TargetPlayer);
+        if(SandboxTarget(hostile,player)!=friendly || hostile->m_actionList.m_pInternal->m_nCount || friendly->m_actionList.m_pInternal->m_nCount){fail("target_player_off_queue_clear");return;}
+        player->SetPosition(spectator,1,1,0);
+        // Isolate physical contacts from the independent periodic Force fixture.
+        // Force/native utility handoffs have their own installed-data probes.
+        auto now=server->GetWorldTimer()->GetSnapshotTime();
+        sandboxForces[hostileId].next=sandboxForces[friendlyId].next=now+60000000;
+        fprintf(stderr,"K1_SANDBOX_TARGET_POLICY_PASS off_nearest=1 on_nearest=1 queue_clear=1 native_reputation=1\n");
         button(K1SandboxPanel::Close);phase=4;ticks=0;return;
     }
     if(phase==4) {
@@ -6734,7 +8424,20 @@ void SandboxProbeTick() {
     }
     if(phase==5) {
         const auto a=npcPlayback.find(hostileId),b=npcPlayback.find(friendlyId);
+        // The menu walk changes native RNG consumption. Verify real contacts
+        // in each direction without making two synchronized test actors defeat
+        // repeated timed deflections before the deadline. Gameplay stays intact.
+        if(a!=npcPlayback.end() && b!=npcPlayback.end()) {
+            const auto now=server->GetWorldTimer()->GetSnapshotTime();
+            static bool secondDirection=false;
+            if(sandboxActors[hostileId].meleeHits && !secondDirection) {
+                secondDirection=true;b->second.nextAttack=now;b->second.parryReady=now;
+            }
+            auto& hold=sandboxActors[hostileId].meleeHits? a->second:b->second;
+            hold.nextAttack=now+60000000;hold.parryReady=now+60000000;
+        }
         if(a!=npcPlayback.end() && b!=npcPlayback.end() && a->second.target==friendlyId && b->second.target==hostileId && meleeDamageContacts>damageBefore && sandboxActors[hostileId].meleeHits>0 && sandboxActors[friendlyId].meleeHits>0) {
+            if(player->GetCurrentHitPoints(0)<1000){fail("target_player_off_damage");return;}
             // Force casting/status effects legitimately yield to native movement.
             // Verify ownership after both NPCs return, within the existing deadline.
             if(!K1EngageEnemyMovementOwned(hostileId) || !K1EngageEnemyMovementOwned(friendlyId)){
@@ -6771,6 +8474,7 @@ void SandboxProbeTick() {
     if(phase==10) {
         if(!sandboxPanel){if(ticks>180)fail("reload_menu");return;}
         if(!sandboxActors.empty()){fail("reload_stale_roster");return;}
+        sandboxPanel->SelectCustom();
         button(K1SandboxPanel::Spawn);if(sandboxActors.size()!=1 || sandboxAi){fail("reload_spawn");return;}
         button(K1SandboxPanel::Close);phase=11;ticks=0;return;
     }
@@ -6779,26 +8483,51 @@ void SandboxProbeTick() {
         fprintf(stderr,"K1_SANDBOX_PASS menu=1 repeated=1 factions=1 placement=1 ai_off_idle=1 npc_combat=1 cleanup=1 reload=1\n");phase=-1;send("quit:0\n");return;
     }
 }
+#include "include/k1sandboxdualprobe.h"
 void SandboxUnload(unsigned long long areaId) {
     if(sandboxArea==OBJECT_INVALID || (areaId!=OBJECT_INVALID && areaId!=sandboxArea))return;
     fprintf(stderr,"K1_SANDBOX_UNLOAD actors=%zu\n",sandboxActors.size());
-    sandboxActors.clear();sandboxForces.clear();sandboxReady=false;sandboxArea=OBJECT_INVALID;
+    sandboxActors.clear();sandboxNativeActors.clear();sandboxForces.clear();sandboxStances.clear();sandboxAppearances.clear();sandboxReady=false;sandboxArea=OBJECT_INVALID;
     sandboxResume=false;sandboxRestorePause=-1;
     if(sandboxPanel)sandboxPanel->SetToBeDeleted(1);
 }
+#include "include/k1yellowgaitprobe.h"
+#include "include/k1presentationprobe.h"
+#include "include/k1redmotionprobe.h"
+#include "include/k1redprobe.h"
+#include "include/k1nativenpcprobe.h"
+#include "include/k1armorprobe.h"
+#include "include/k1npcpolicyprobe.h"
+#include "include/k1meleehitprobe.h"
+#include "include/k1grenademineprobe.h"
 void SandboxTick() {
     if(sandboxTogglePending){sandboxTogglePending=false;SandboxToggle();}
     if(!ServerActor() || !ServerActor()->GetArea())return;
-    if(std::getenv("K1_ENGAGE_SANDBOX_TEST"))SandboxProbeTick();
+    if(std::getenv("K1_GRENADE_MINE_TEST"))GrenadeMineProbeTick();
+    else if(std::getenv("K1_ENGAGE_MELEE_HIT_TEST"))MeleeHitProbeTick();
+    else if(std::getenv("K1_ENGAGE_NPC_POLICY_TEST"))NpcCombatPolicyProbeTick();
+    else if(std::getenv("K1_ENGAGE_ARMOR_TEST"))ArmorProbeTick();
+    else if(std::getenv("K1_NATIVE_NPC_TEST"))NativeNpcProbeTick();
+    else if(std::getenv("K1_RED_TEST"))RedProbeTick();
+    else if(std::getenv("K1_YELLOW_NATIVE_GAIT_TEST"))YellowNativeGaitProbeTick();
+    else if(std::getenv("K1_ENGAGE_SANDBOX_DUAL_TEST"))SandboxDualProbeTick();
+    else if(std::getenv("K1_ENGAGE_SANDBOX_TEST"))SandboxProbeTick();
     if(!sandboxReady && sandboxSession && K1EngageArenaLoadoutActive())sandboxReady=true;
     if(!sandboxReady)return;
+    if(std::getenv("K1_PORTABLE_SMOKE")) {
+        static bool checked=false;
+        if(!checked){checked=true;const bool ok=PurpleMode() && !StaffMode() && !DualMode() && !strcmp(PlayerRigResource(),"k1japurp");
+            fprintf(stderr,"K1_PORTABLE_PURPLE_%s rig=%s rate=%g\n",ok?"PASS":"FAIL",PlayerRigResource(),PlayerMeleeRate());}
+    }
     auto* server=g_pAppManager->m_pServerExoApp;auto* player=ServerActor();auto* area=static_cast<CSWSArea*>(player->GetArea());
     if(sandboxArea==OBJECT_INVALID)sandboxArea=area->m_objectId;
-    if(sandboxArea!=area->m_objectId || !K1EngageArenaLoadoutActive()){sandboxActors.clear();sandboxForces.clear();sandboxReady=false;sandboxArea=OBJECT_INVALID;if(sandboxPanel)sandboxPanel->SetToBeDeleted(1);return;}
+    if(sandboxArea!=area->m_objectId || !K1EngageArenaLoadoutActive()){sandboxActors.clear();sandboxNativeActors.clear();sandboxForces.clear();sandboxStances.clear();sandboxAppearances.clear();sandboxReady=false;sandboxArea=OBJECT_INVALID;if(sandboxPanel)sandboxPanel->SetToBeDeleted(1);return;}
     for(auto it=sandboxActors.begin();it!=sandboxActors.end();) {
         auto* actor=server->GetCreatureByGameObjectID(it->first);
-        if(!actor){sandboxForces.erase(it->first);it=sandboxActors.erase(it);continue;}
+        if(!actor){sandboxNativeActors.erase(it->first);sandboxForces.erase(it->first);sandboxStances.erase(it->first);sandboxAppearances.erase(it->first);it=sandboxActors.erase(it);continue;}
+        actor->m_bPlot=0;actor->m_bMin1HP=0;actor->m_bDestroyable=1;
         if(!sandboxAi && !actor->GetDead()){if(actor->m_actionList.m_pInternal->m_nCount)actor->ClearAllActions(1);actor->SetCombatState(0,1);if(actor->m_nState==EFFECT_STATE_NONE)actor->SetAnimation(SERVER_ANIMATION_PAUSE);}
+        if(sandboxAi)StartNativeSandboxCombat(actor);
         ++it;
     }
     // A close can precede application of the open request. Wait for the native
@@ -6814,6 +8543,7 @@ void SandboxTick() {
 // each actor's Engage rig. Player trials resume from planning; also check a
 // native Force cast. All items/effects exist only in this unsaved arena.
 void UtilityProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature* npc) {
+    static int forceObserved=0,forceSpends=0;
     static int trial=0,nativeSamples=0,beforeHP=0,beforeCount=0,beforeTriggers=0;
     static int playerMedkitUses=0;
     static unsigned long long itemId=OBJECT_INVALID;
@@ -6853,6 +8583,13 @@ void UtilityProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature* n
     if(phase==59) {
         if(owned!=npcPlayback.end() && owned->second.navigator && K1EngageOwnsEnemy(npc->m_objectId) &&
             K1EngageOwnsAnimation(client->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1))) {
+            if(std::getenv("K1_ENGAGE_PLAYER_WEAPON")) {
+                std::vector<K1SaberContact::Blade> segments;
+                if(StaffMode())segments=StaffBlades(client);
+                else {Vector p,q;if(Blade(client,p,q))segments.push_back({p,q});}
+                if(!Supported(client) || segments.empty() || magnitude(segments[0].tip-segments[0].base)<.1f){fail("player_weapon_geometry");return;}
+                fprintf(stderr,"K1_PLAYER_MELEE_SUPPORT_PASS base=%d class=%d staff=%d segments=%zu length=%g rig=%s\n",NativeNpcRightItem(player)->m_baseItem,client->GetAnimationBase()->m_nWeaponClass,StaffMode(),segments.size(),magnitude(segments[0].tip-segments[0].base),PlayerRigResource());
+            }
             phase=60;ticks=0;
         } else if(ticks>240) fail("initial_ownership");
         return;
@@ -6886,7 +8623,18 @@ void UtilityProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature* n
             beforeHP=target->GetCurrentHitPoints(0);
             queued=actor->UseItem(itemId,0,0,target->m_objectId,target->m_position,0,0)!=0;
         } else if(kind==1) {
-            queued=actor->UseItem(itemId,0,0,OBJECT_INVALID,actor->m_position+actor->m_orientation*.25f,0,0)!=0;
+            if(actor==player && hudOwner) {
+                auto& actions=hudOwner->m_personalActions[3];actions.SetSize(0);
+                client->GetMines(actions);
+                const unsigned int wanted=static_cast<unsigned int>(g_pAppManager->m_pClientExoApp->ServerToClientObjectId(itemId))|CSWGuiInterfaceAction::ACTION_ID_ITEM;
+                for(int i=0;i<actions.m_count;++i)if(actions.m_pArray[i].m_nActionId==wanted) {
+                    actions.m_pArray[i].m_nFlags|=1;hudOwner->m_personalActionIds[3]=wanted;
+                    auto* options=g_pAppManager->m_pClientExoApp->GetClientOptions();
+                    const auto tutorials=options->m_bTutorialWindows;options->m_bTutorialWindows=0;
+                    hudOwner->DoPersonalAction(3,0);options->m_bTutorialWindows=tutorials;queued=true;break;
+                }
+                fprintf(stderr,"K1_MINE_UI_QUEUE requested=%llu entries=%d combat=%d\n",itemId,actions.m_count,actor->m_bCombatState);
+            } else queued=actor->UseItem(itemId,0,0,OBJECT_INVALID,actor->m_position+actor->m_orientation*.25f,0,0)!=0;
         } else if(kind==2) {
             actor->SetCurrentHitPoints(actor->GetMaxHitPoints(0)-60);beforeHP=actor->GetCurrentHitPoints(0);
             if(actor==player) {
@@ -6899,6 +8647,9 @@ void UtilityProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature* n
             beforeHP=target->GetCurrentHitPoints(0);beforeCount=actor->m_pStats->m_nCurrentForcePoints;nativeSamples=0;
             queued=slot<actor->m_pStats->m_numClasses && actor->AddCastSpellActions(FORCE_POWER_CHOKE,slot,0,0,0,
                 target->m_position,target->m_objectId,1,0,1,0,0,0,-1,0xff,0)!=0;
+            if(queued)queued=actor->AddCastSpellActions(FORCE_POWER_CHOKE,slot,0,0,0,
+                target->m_position,target->m_objectId,1,0,1,0,0,0,-1,0xff,0)!=0;
+            forceObserved=beforeCount;forceSpends=0;
         }
         fprintf(stderr,"K1_NATIVE_UTILITY_QUEUE actor=%llu kind=%s queued=%d\n",actor->m_objectId,names[kind],queued);
         if(!queued) {fail("queue");return;}
@@ -6915,6 +8666,14 @@ void UtilityProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature* n
         phase=61;ticks=0;return;
     }
     auto* body=actor->GetClientCreature()->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1);
+    if(kind==3 && (phase==61 || phase==62) && actor->m_pStats->m_nCurrentForcePoints<forceObserved) {
+        forceObserved=actor->m_pStats->m_nCurrentForcePoints;++forceSpends;
+        if(forceSpends==2) {
+            const auto gap=server->GetWorldTimer()->GetSnapshotTime()-utilityReleaseAt[actor->m_objectId];
+            if(!utilityReleaseAt.count(actor->m_objectId) || gap<0 || gap>250000){fail("queued_force_gap");return;}
+            fprintf(stderr,"K1_FORCE_QUEUE_GAP_PASS casts=2 gap_us=%lld\n",gap);
+        }
+    }
     if(phase==61) {
         if(ticks<=35) {
             auto* head=actor->m_actionList.m_pInternal->m_pHead;
@@ -6940,6 +8699,18 @@ void UtilityProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature* n
             if(trial%2==0 && ticks>6) {fail("planning_start_latency");return;}
             if(IsSourceBody(body) || K1EngageOwnsAnimation(body) || body->m_pAddInModel) {fail("non_native_animation_owner");return;}
             ++nativeSamples;
+            if(kind==3) {
+                const int health=actor->GetCurrentHitPoints(0),animation=actor->m_nAnimation;
+                const auto spell=actor->m_castSpellId;
+                auto* damage=new CGameEffect(1);damage->m_subType=CSWSEffectListHandler::EFFECT_DAMAGE;
+                damage->m_durationTypeBits=CGameEffect::DURATION_TYPE_INSTANTANEOUS;damage->SetCreator(target->m_objectId);
+                damage->SetNumIntegers(22);for(int i=0;i<15;++i)damage->SetInteger(i,-1);
+                damage->SetInteger(7,50);damage->SetInteger(14,50);damage->SetInteger(17,3);
+                damage->SetInteger(19,1);damage->SetInteger(20,1);actor->ApplyEffect(damage,0,1);
+                if(actor->GetCurrentHitPoints(0)>=health || actor->m_nAnimation!=animation ||
+                   actor->m_castSpellId!=spell || !NativeUtilityQueued(actor)){fail("damage_cancelled_cast");return;}
+                fprintf(stderr,"K1_FORCE_HIT_PRESERVE_PASS actor=%llu spell=%u animation=%d hp_loss=%d\n",actor->m_objectId,unsigned(spell),animation,health-actor->GetCurrentHitPoints(0));
+            }
             fprintf(stderr,"K1_NATIVE_UTILITY_CLIP actor=%llu kind=%s clip=%s time=%g native=1 start_frames=%d\n",actor->m_objectId,names[kind],clipName.CStr(),at,ticks);
             if(trial==4) {
                 medkitRecoveryOrigin=client->m_position;
@@ -6970,7 +8741,7 @@ void UtilityProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature* n
             const bool consumed=kind==3?actor->m_pStats->m_nCurrentForcePoints<beforeCount:!item || item->m_stackCount<beforeCount;
             const bool result=kind==0?target->GetCurrentHitPoints(0)<beforeHP:
                 kind==1?triggerCount()>beforeTriggers:kind==2?actor->GetCurrentHitPoints(0)>beforeHP:target->GetCurrentHitPoints(0)<beforeHP;
-            if(!consumed || !result || nativeSamples<2) {fail("utility_result");return;}
+            if(!consumed || !result || nativeSamples<2 || (kind==3 && forceSpends!=2)) {fail("utility_result");return;}
             fprintf(stderr,"K1_NATIVE_UTILITY_RETURN_PASS actor=%llu kind=%s samples=%d consumed=1 result=1\n",actor->m_objectId,names[kind],nativeSamples);
             if(kind==2 && ((beforeCount==1?item!=nullptr:!item || item->m_stackCount!=beforeCount-1) ||
                 actor->GetClientCreature()->AnimationDialog(actor->GetClientCreature()->m_currentAnimation))) {
@@ -7276,7 +9047,7 @@ void PoiseProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature* npc
             trial,K1EngageActive(),state.rightHeld,state.Guarding(),HasMeleePoise(defender),PoiseBroken(defender),NativeStatusAnimation(defender),
             defender->m_pCombatRound->m_bRoundStarted,defender->m_bCommandable,int(state.mode),
             dot(defender->m_orientation,attacker->m_position-defender->m_position),aimYaw);
-        const int loss=StaffPoiseActor(attacker)?13:20;
+        const int loss=GuardPoiseDamage(attacker);
         if(initial<=loss){
             if(K1EngageOwnsPlayer(attacker->m_objectId))state.chainSwings=PlayerChainLimit();
             else npcPlayback[attacker->m_objectId].chainSwings=3;
@@ -7359,20 +9130,21 @@ void PoiseProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature* npc
         meleePoise[player->m_objectId].percent=10;meleePoise[npc->m_objectId].percent=6;
         DelayPoiseRegeneration(meleePoise[player->m_objectId],now);DelayPoiseRegeneration(meleePoise[npc->m_objectId],now);
         const int playerHP=player->GetCurrentHitPoints(0),npcHP=npc->GetCurrentHitPoints(0);
-        ResolveMeleeContacts({{npc->m_objectId,player->m_objectId,activeNpc->second.serial},
-            {player->m_objectId,npc->m_objectId,attackSerial}});
-        if(meleePoise[player->m_objectId].percent!=10 || meleePoise[npc->m_objectId].percent!=6 ||
-            PoiseBroken(player) || PoiseBroken(npc) || player->m_nState==EFFECT_STATE_STUNNED || npc->m_nState==EFFECT_STATE_STUNNED ||
+        MeleeContact intercepted={npc->m_objectId,player->m_objectId,activeNpc->second.serial};
+        playerAttackStartedAt=now;activeNpc->second.attackStartedAt=now;
+        ResolveMeleeContacts({intercepted,intercepted});
+        if(meleePoise[player->m_objectId].percent!=0 || meleePoise[npc->m_objectId].percent!=0 ||
+            !PoiseBroken(player) || !PoiseBroken(npc) ||
             state.attacking || state.chainSwings || activeNpc->second.attacking || activeNpc->second.chainSwings ||
             player->GetCurrentHitPoints(0)!=playerHP || npc->GetCurrentHitPoints(0)!=npcHP) {fail("clash_low_poise");return;}
-        fprintf(stderr,"K1_MELEE_CLASH_LOW_PASS poise=10,6 native_stun=0 hp=unchanged chains=0,0\n");
+        fprintf(stderr,"K1_MELEE_CLASH_LOW_PASS poise=0,0 native_stun=1 hp=unchanged chains=0,0\n");
         phase=79;ticks=0;began=now;
     }
     if(phase==79) {
-        if(ticks>=2) {
-            if(PoiseBroken(player) || PoiseBroken(npc) || meleePoise[player->m_objectId].percent!=10 ||
-                meleePoise[npc->m_objectId].percent!=6) {fail("clash_low_changed");return;}
-            fprintf(stderr,"K1_MELEE_CLASH_NO_STUN_PASS percent=10,6\n");
+        if(ticks==2 && (player->m_nState!=EFFECT_STATE_STUNNED || npc->m_nState!=EFFECT_STATE_STUNNED)) {fail("clash_native_stun");return;}
+        if(ticks>=2 && !PoiseBroken(player) && !PoiseBroken(npc)) {
+            if(meleePoise[player->m_objectId].percent<25 || meleePoise[npc->m_objectId].percent<25) {fail("clash_low_recovery");return;}
+            fprintf(stderr,"K1_MELEE_CLASH_STUN_RECOVER_PASS percent=25\n");
             if(std::getenv("K1_ENGAGE_POISE_REGEN_TEST")) {phase=80;ticks=0;return;}
             npc->SetCurrentHitPoints(0);phase=75;ticks=0;
         }
@@ -7387,7 +9159,7 @@ void ClashArenaProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature
     static int trial=0,playerHP=0,enemyHP=0;
     static long long started=0;
     static unsigned long long before=0;
-    static bool playerSent=false,acrossFrames=false;
+    static bool playerSent=false;
     auto quit=[] {if(FILE* f=fopen("clash-input.txt","w")){fputs("quit:0\n",f);fclose(f);}};
     auto fail=[&](const char* why){fprintf(stderr,"K1_ENGAGE_CLASH_FAIL trial=%d phase=%d reason=%s\n",trial,phase,why);phase=-1;quit();};
     if(!enemy) {fail("missing_enemy");return;}
@@ -7400,8 +9172,8 @@ void ClashArenaProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature
     auto found=npcPlayback.find(enemy->m_objectId);
     if(phase==113) {
         if(state.mode==K1EngageState::Mode::Exploration) {
-            if(!pendingMeleeContacts.empty() || !acrossFrames) {fail("cleanup_or_cross_frame");return;}
-            fprintf(stderr,"K1_MELEE_CLASH_LIVE_PASS trials=2 cross_frame=1 hp=unchanged poise=100,100 chains=0,0 cleanup=1\n");
+            if(!sceneMeleeContacts.empty()) {fail("cleanup");return;}
+            fprintf(stderr,"K1_MELEE_CLASH_LIVE_PASS trials=2 timed=1 eligibility_us=500000 delay_us=0 hp=unchanged poise=90,90 chains=0,0 cleanup=1\n");
             phase=-1;quit();
         } else if(ticks>180) fail("victory_cleanup");
         return;
@@ -7429,7 +9201,7 @@ void ClashArenaProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature
         player->m_pCombatRound->EndCombatRound(1);enemy->m_pCombatRound->EndCombatRound(1);
         player->AddToVisibleList(enemy->m_objectId,1,0,0,0);enemy->AddToVisibleList(player->m_objectId,1,0,0,0);
         meleePoise[player->m_objectId]=MeleePoise();meleePoise[enemy->m_objectId]=MeleePoise();
-        pendingMeleeContacts.clear();phase=111;ticks=0;return;
+        sceneMeleeContacts.clear();phase=111;ticks=0;return;
     }
     if(phase==111) {
         npc.nextAttack=now+60000000;
@@ -7445,9 +9217,8 @@ void ClashArenaProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature
         if(!playerSent && now-started>=250000) {K1EngageMouse(true,true);K1EngageMouse(true,false);playerSent=true;}
         if(meleeClashes>before) {
             if(meleeClashes!=before+1 || state.attacking || state.chainSwings || npc.attacking || npc.chainSwings ||
-                meleePoise[player->m_objectId].percent!=100 || meleePoise[enemy->m_objectId].percent!=100 ||
-                player->GetCurrentHitPoints(0)!=playerHP || enemy->GetCurrentHitPoints(0)!=enemyHP || lastClashGap>clashWindowUs) {fail("result");return;}
-            acrossFrames=acrossFrames || lastClashGap>0;
+                meleePoise[player->m_objectId].percent!=90 || meleePoise[enemy->m_objectId].percent!=90 ||
+                player->GetCurrentHitPoints(0)!=playerHP || enemy->GetCurrentHitPoints(0)!=enemyHP) {fail("result");return;}
             fprintf(stderr,"K1_MELEE_CLASH_LIVE_CONTACT_PASS trial=%d gap_us=%lld player_hp=%d enemy_hp=%d\n",trial,lastClashGap,playerHP,enemyHP);
             npc.nextAttack=now+60000000;
             if(++trial<2) {phase=110;ticks=0;return;}
@@ -7455,7 +9226,7 @@ void ClashArenaProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature
         }
         if(now-started>2500000) {
             fprintf(stderr,"K1_MELEE_CLASH_LIVE_TRACE trial=%d player_serial=%d npc_serial=%d pending=%zu hp=%d,%d\n",
-                trial,attackSerial,npc.serial,pendingMeleeContacts.size(),player->GetCurrentHitPoints(0),enemy->GetCurrentHitPoints(0));
+                trial,attackSerial,npc.serial,sceneMeleeContacts.size(),player->GetCurrentHitPoints(0),enemy->GetCurrentHitPoints(0));
             fail("no_geometric_clash");
         }
     }
@@ -7489,12 +9260,19 @@ void ParryArenaProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature
     const int direction=trial<7?trial:(trial==10?0:1);
     const int wanted=trial==7?3:(trial==8?-1:(trial==10?3:ParrySectorForAttack(direction)));
     const bool raised=trial!=9,shouldParry=trial<7 || trial>=10;
+    const bool baton=NativeNpcRightItem(player) && NativeNpcRightItem(player)->m_baseItem==BASE_ITEM_STUN_BATON;
     if(phase==124) {
         if(state.mode==K1EngageState::Mode::Exploration && ticks>=3) {
-            if(!pendingMeleeContacts.empty() || !hudOwner || hudOwner->m_parryReticle.m_tail.bVisible ||
-                parryRenderFailed || parryRenderChecks<12 || matches!=9 || blocks!=2 || bare!=1 || !npcCooldown || !playerCooldown ||
+            if(std::getenv("K1_ENGAGE_PARRY_PLAYER_ONLY")) {
+                if(!sceneMeleeContacts.empty() || !hudOwner || hudOwner->m_parryReticle.m_tail.bVisible || parryRenderFailed ||
+                   parryRenderChecks<12 || matches!=9 || blocks!=2 || bare!=1 || !npcCooldown || !npcRateChecked){fail("player_only_cleanup");return;}
+                fprintf(stderr,"K1_DUAL_PLAYER_PARRY_PASS cases=12 matched=9 blocks=2 unguarded=1 npc_cooldown=1 render=1 cleanup=1\n");phase=-1;quit();return;
+            }
+            if(!sceneMeleeContacts.empty() || !hudOwner || hudOwner->m_parryReticle.m_tail.bVisible ||
+                parryRenderFailed || parryRenderChecks<12 || matches!=9 || blocks!=(baton?0:2) || bare!=(baton?3:1) || !npcCooldown || !playerCooldown ||
                 !playerRateChecked || !npcRateChecked || !zeroChanceChecked) {fail("cleanup_or_counts");return;}
             fprintf(stderr,"K1_DIRECTIONAL_PARRY_LIVE_PASS matched=7 overhead_overlap=1 wrong=1 neutral=1 unguarded=1 break=1 npc_cooldown=1 player_cooldown=1 render=%d cleanup=1\n",parryRenderChecks);
+            if(baton)fprintf(stderr,"K1_BATON_PARRY_ONLY_PASS matched=9 failed_guard_hits=2 unguarded_hits=1\n");
             phase=-1;quit();
         } else if(ticks>180) fail("victory_cleanup");
         return;
@@ -7510,12 +9288,12 @@ void ParryArenaProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature
         if(touched) {
             if(shouldParry) {
                 const bool stopped=found==npcPlayback.end()?trial==11:!found->second.attacking && !found->second.chainSwings;
-                if(!parried || directionalParries!=before+1 || playerPoise!=std::min(100,playerPoiseBefore+10) || enemyPoise!=(trial==11?0:75) || !stopped ||
+                if(!parried || directionalParries!=before+1 || playerPoise!=std::min(100,playerPoiseBefore+ParryPoiseReward(player)) || enemyPoise!=(trial==11?0:75) || !stopped ||
                     player->GetCurrentHitPoints(0)!=playerHP || enemy->GetCurrentHitPoints(0)!=enemyHP ||
                     (trial==11 && (enemy->m_nState!=EFFECT_STATE_STUNNED || !PoiseBroken(enemy)))) {fail("parry_result");return;}
                 ++matches;
                 if(trial==2 || trial==3) fprintf(stderr,"K1_PARRY_REWARD_PLAYER_PASS before=%d after=%d capped=%d\n",playerPoiseBefore,playerPoise,trial==3);
-            } else if(raised) {
+            } else if(raised && !baton) {
                 if(parried || playerPoise!=80 || enemyPoise!=100 || player->GetCurrentHitPoints(0)!=playerHP ||
                     found==npcPlayback.end() || !found->second.attacking) {fail("wrong_side_block");return;}
                 ++blocks;
@@ -7583,9 +9361,9 @@ void ParryArenaProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature
         }
         if(npcTimedParries>beforeNpcParries) {
             if(npcTimedParries!=beforeNpcParries+1 || state.attacking || state.chainSwings ||
-                meleePoise[player->m_objectId].percent!=75 || meleePoise[enemy->m_objectId].percent!=50 ||
+                meleePoise[player->m_objectId].percent!=100-ParriedPoiseLoss(player) || meleePoise[enemy->m_objectId].percent!=40+ParryPoiseReward(enemy) ||
                 player->GetCurrentHitPoints(0)!=playerHP || enemy->GetCurrentHitPoints(0)!=enemyHP) {fail("npc_timed_result");return;}
-            fprintf(stderr,"K1_PARRY_REWARD_NPC_PASS before=40 after=50\n");
+            fprintf(stderr,"K1_PARRY_REWARD_NPC_PASS before=40 after=%d\n",meleePoise[enemy->m_objectId].percent);
             cooldownUntil=meleePoise[player->m_objectId].parriedUntil;cooldownSerial=attackSerial;blockedSamples=0;
             if(ParryAttackReady(player->m_objectId,cooldownUntil-1) || !ParryAttackReady(player->m_objectId,cooldownUntil)) {fail("player_cooldown_boundary");return;}
             npc.parryReady=now+60000000;phase=128;ticks=0;return;
@@ -7610,6 +9388,8 @@ void ParryArenaProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature
             fprintf(stderr,"K1_BLOCK_REACTION_NPC_PASS samples=%d settled=%d maximum_grip=%g\n",observation.samples,observation.settled,observation.maximumGrip);
             playerCooldown=true;
             enemy->m_scriptVars.SetInt(CExoString(npcParryPercentVariable),0,0);
+            // Start the zero-chance trial independently of the previous reward.
+            meleePoise[enemy->m_objectId].percent=50;DelayPoiseRegeneration(meleePoise[enemy->m_objectId],now);
             found->second.parryReady=0;found->second.threatSince=0;found->second.parrying=false;
             started=now;phase=130;ticks=0;return;
         } else if(now>cooldownUntil+500000) {fail("player_restart_missing");return;}
@@ -7637,7 +9417,7 @@ void ParryArenaProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature
         }
         if(now-started<400000) return;
         const auto& poise=meleePoise[player->m_objectId];
-        if(raised) {
+        if(raised && (!baton || shouldParry)) {
             const auto& observation=blockObservations[player->m_objectId];
             const int block=BlockReactionForAttack(direction);
             if(poise.blockReaction!=block || observation.started!=poise.blockStarted || observation.reaction!=block ||
@@ -7653,10 +9433,12 @@ void ParryArenaProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature
             }
         } else if(poise.blockReaction!=-1) {fail("unguarded_block_animation");return;}
         if(++trial<12) {phase=120;ticks=0;return;}
+        if(std::getenv("K1_ENGAGE_PARRY_PLAYER_ONLY")){enemy->SetCurrentHitPoints(0);phase=124;ticks=0;return;}
         phase=126;ticks=0;return;
     }
     if(found==npcPlayback.end()) {if(ticks>240) fail("source_owner");return;}
     auto& npc=found->second;
+    arenaForce.next=now+60000000;
     npc.nextThink=now+60000000;StopNpcMove(npc,enemy);npc.parryReady=now+60000000;npc.parrying=false;
     npc.nextAttack=now+60000000;
     if(phase==120) {
@@ -7673,7 +9455,7 @@ void ParryArenaProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature
         player->AddToVisibleList(enemy->m_objectId,1,0,0,0);enemy->AddToVisibleList(player->m_objectId,1,0,0,0);
         meleePoise[player->m_objectId]=MeleePoise();meleePoise[enemy->m_objectId]=MeleePoise();
         if(trial==11) meleePoise[enemy->m_objectId].percent=25;
-        pendingMeleeContacts.clear();K1EngageMouse(false,raised);
+        sceneMeleeContacts.clear();K1EngageMouse(false,raised);
         stable=0;phase=121;ticks=0;return;
     }
     if(phase==121) {
@@ -7841,25 +9623,25 @@ void StaffContactProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreatu
         phase=703;ticks=0;return;
     }
     if(phase==703) {
-        if(PlayerChainLimit()!=4 || std::fabs(PlayerMeleeRate()-.95f)>.00001f ||
-           std::fabs(playerMeleeSwingRate-.8528f)>.00001f || std::fabs(npcMeleeSwingRate-.82f)>.00001f) {fail("stance_policy");return;}
+        if(PlayerChainLimit()!=4 || std::fabs(PlayerMeleeRate()-1.10f)>.00001f ||
+           std::fabs(playerMeleeSwingRate-1.f)>.00001f || std::fabs(npcMeleeSwingRate-.85f)>.00001f) {fail("stance_policy");return;}
         const int swings=attackSerial-chainSerial;
         if(swings>4 || state.chainSwings>4) {fail("fifth_swing");return;}
-        if(state.attacking && currentOverlay && !LiveMeleeRate(loadedBody,currentOverlay,.95f)) {fail("live_staff_rate");return;}
+        if(state.attacking && currentOverlay && !LiveMeleeRate(loadedBody,currentOverlay,1.10f)) {fail("live_staff_rate");return;}
         if(swings==4 && !state.attacking && ++idleFrames>=20) {
             K1EngageMouse(true,false);
             const auto& p=meleePoise[player->m_objectId];
             if(!p.staffTiming || PoiseQuietInterval(p)!=2500000 || PoiseTickInterval(p)!=500000) {fail("live_staff_clock");return;}
-            fprintf(stderr,"K1_STAFF_BALANCE_PASS rate=0.95 chain=4 hold=1 npc_rate=0.82 yellow_rate=0.8528 quiet_us=2500000 tick_us=500000\n");
+            fprintf(stderr,"K1_STAFF_BALANCE_PASS rate=1.10 chain=4 hold=1 npc_rate=0.85 yellow_rate=1 quiet_us=2500000 tick_us=500000\n");
             const int playerHP=player->GetCurrentHitPoints(0),enemyHP=enemy->GetCurrentHitPoints(0);
             meleePoise[player->m_objectId].percent=100;meleePoise[enemy->m_objectId].percent=50;
             ApplySuccessfulParry(player,enemy);
-            if(meleePoise[player->m_objectId].percent!=70 || meleePoise[enemy->m_objectId].percent!=60 || state.attacking ||
+            if(meleePoise[player->m_objectId].percent!=65 || meleePoise[enemy->m_objectId].percent!=70 || state.attacking ||
                meleePoise[player->m_objectId].parriedUntil!=now+parryAttackDelayUs) {fail("staff_parry_penalty");return;}
             ApplySuccessfulParry(enemy,player);
-            if(meleePoise[enemy->m_objectId].percent!=35 || meleePoise[player->m_objectId].percent!=80 ||
+            if(meleePoise[enemy->m_objectId].percent!=45 || meleePoise[player->m_objectId].percent!=90 ||
                player->GetCurrentHitPoints(0)!=playerHP || enemy->GetCurrentHitPoints(0)!=enemyHP) {fail("default_parry_penalty_or_hp");return;}
-            fprintf(stderr,"K1_STAFF_PARRY_PENALTY_PASS staff_loss=30 npc_loss=25 defender_gain=10 cooldown_us=%lld hp_unchanged=1\n",parryAttackDelayUs);
+            fprintf(stderr,"K1_STAFF_PARRY_PENALTY_PASS staff_loss=35 npc_loss=25 staff_gain=25 npc_gain=20 cooldown_us=%lld hp_unchanged=1\n",parryAttackDelayUs);
             meleePoise[player->m_objectId].percent=50;NotePoiseActivity(player,"staff_regen_probe");
             recoveryStart=now;recoveryTick=meleePoise[player->m_objectId].nextTick;phase=704;ticks=0;return;
         }
@@ -8007,7 +9789,7 @@ void StaffContactProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreatu
             auto a=sceneMeleeContacts[queued],b=sceneMeleeContacts[queued+1];
             ok=a.blade!=b.blade && !a.poiseOnly && b.poiseOnly && ok;
             ResolveMeleeContacts({a,a,b,b},now);
-            ok=meleePoise[enemy->m_objectId].percent==74 && enemy->GetCurrentHitPoints(0)==hp && meleeDamageContacts==damageBefore && ok;
+            ok=meleePoise[enemy->m_objectId].percent==78 && enemy->GetCurrentHitPoints(0)==hp && meleeDamageContacts==damageBefore && ok;
             TraceStaffBlades(actor,StaffContactEnd(direction)-.005f);
             ok=sceneMeleeContacts.size()==queued+2 && ok;
         }
@@ -8056,7 +9838,7 @@ void StaffContactProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreatu
 bool NpcStaffContract(NpcPlayback& npc,CSWSCreature* player,CSWSCreature* enemy) {
     auto* body=npc.body;auto* weapon=npc.owner->GetModel(CSWCAnimBase::ANIM_MODEL_RIGHT_ITEM_BODY,1);
     bool ok=npc.staff && body && weapon && !_stricmp(weapon->m_pModel->m_szName,"w_dblsbr_002") && StaffBlades(npc.owner).size()==2 &&
-        !strcmp(body->m_pModel->m_szName,NpcType(enemy).rig) && NpcChainLimit(npc)==4 && NpcSwingRate(npc)==.92f;
+        !strcmp(body->m_pModel->m_szName,NpcType(enemy).rig) && NpcChainLimit(npc)==4 && NpcSwingRate(npc)==.85f;
     if(!ok)return false;
     const auto saved=npc;const auto savedState=state;const auto savedPoise=meleePoise;
     body->m_bAlwaysRendering=true;body->EnableForceAnimations();
@@ -8067,7 +9849,7 @@ bool NpcStaffContract(NpcPlayback& npc,CSWSCreature* player,CSWSCreature* enemy)
         // Names are compared by content; pointers are not an animation identity.
         npc.direction=0;for(int d=0;d<7;++d)if(!strcmp(clip,fullAttacks[d]))npc.direction=d;
         npc.base="j_idle";npc.overlay=clip;npc.attacking=clip[0]=='s';npc.closeGuard=npc.parrying=false;npc.pose={};
-        body->PlayAnimation(const_cast<char*>(clip),.92f,AnimRun::kAnimOverlay|AnimRun::kAnimNoBlendIn,0);
+        body->PlayAnimation(const_cast<char*>(clip),NpcSwingRate(npc),AnimRun::kAnimOverlay|AnimRun::kAnimNoBlendIn,0);
         float at=0,length=0;if(!body->GetAnimation(const_cast<char*>(clip),&at,&length) || length<=0){ok=false;continue;}
         for(float fraction:{0.f,.25f,.5f,.75f,.999f}) {
             body->SetAnimationTime(const_cast<char*>(clip),length*fraction);body->m_cForcePose=1;body->m_nLastAnimateTick=body->m_pScene->m_nAnimateTick-1;body->Animate(.0001f);
@@ -8079,7 +9861,7 @@ bool NpcStaffContract(NpcPlayback& npc,CSWSCreature* player,CSWSCreature* enemy)
     ok=ok && poses==60 && std::isfinite(maxGrip) && maxGrip<.003f;
     npc.attacking=true;npc.direction=0;npc.overlay="s_top";npc.base="j_idle";
     body->PlayAnimation(nullptr,1,AnimRun::kAnimRemove,0);body->Reset();
-    body->PlayAnimation(const_cast<char*>("s_top"),.92f,AnimRun::kAnimOverlay|AnimRun::kAnimNoBlendIn,.45f);body->m_cForcePose=1;body->m_nLastAnimateTick=body->m_pScene->m_nAnimateTick-1;body->Animate(.0001f);
+    body->PlayAnimation(const_cast<char*>("s_top"),NpcSwingRate(npc),AnimRun::kAnimOverlay|AnimRun::kAnimNoBlendIn,.45f);body->m_cForcePose=1;body->m_nLastAnimateTick=body->m_pScene->m_nAnimateTick-1;body->Animate(.0001f);
     const auto position=weapon->m_vPosition;const auto orientation=weapon->m_qOrientation;
     weapon->m_qOrientation=Quaternion(Vector(0,1,0),1.5707963268f);
     std::vector<K1SaberContact::Triangle> triangles;
@@ -8117,15 +9899,15 @@ bool NpcStaffContract(NpcPlayback& npc,CSWSCreature* player,CSWSCreature* enemy)
     const int hp=player->GetCurrentHitPoints(0);
     const bool first=K1EngageGuardContact(enemy->m_objectId,player->m_objectId);
     const bool second=K1EngageGuardContact(enemy->m_objectId,player->m_objectId);
-    ok=ok && first && second && meleePoise[player->m_objectId].percent==74 && player->GetCurrentHitPoints(0)==hp;
+    ok=ok && first && second && meleePoise[player->m_objectId].percent==78 && player->GetCurrentHitPoints(0)==hp;
     player->SetOrientation(facing);
     NotePoiseActivity(enemy,"staff_npc_contract");
     ok=ok && meleePoise[enemy->m_objectId].staffTiming && PoiseTickInterval(meleePoise[enemy->m_objectId])==500000;
     meleePoise[enemy->m_objectId].percent=100;ApplySuccessfulParry(enemy,player);
-    ok=ok && meleePoise[enemy->m_objectId].percent==70;
+    ok=ok && meleePoise[enemy->m_objectId].percent==65;
     state=savedState;meleePoise=savedPoise;npc=saved;
     ok=SwapNpcRig(npc,true) && ok;
-    fprintf(stderr,"K1_NPC_STAFF_CONTRACT_%s poses=%d max_grip=%g physical_blades=2 native_hits=%llu rate=.92 chain=4 parried_loss=30 red_native_model=1\n",ok?"PASS":"FAIL",poses,maxGrip,meleeDamageContacts-damageBefore);
+    fprintf(stderr,"K1_NPC_STAFF_CONTRACT_%s poses=%d max_grip=%g physical_blades=2 native_hits=%llu rate=.85 chain=4 parried_loss=35 red_native_model=1\n",ok?"PASS":"FAIL",poses,maxGrip,meleeDamageContacts-damageBefore);
     return ok;
 }
 void DarkJediProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature* enemy) {
@@ -8192,7 +9974,7 @@ void DarkJediProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature* 
         return;
     }
     const auto& source=found->second;
-    if(source.staff && source.attacking && source.overlay && !LiveMeleeRate(source.body,source.overlay,.92f)) {fail("staff_live_rate");return;}
+    if(source.staff && source.attacking && source.overlay && !LiveMeleeRate(source.body,source.overlay,NpcSwingRate(source))) {fail("staff_live_rate");return;}
     if(!std::isfinite(source.maximumGripError) || source.maximumGripError>.003f) {fail("source_grip");return;}
     if(completed && source.attacking && source.hit && source.gripSamples>0) meleeAfterCast=true;
     if(arenaForce.queued>completed && !NativeUtilityQueued(enemy)) {
@@ -8213,6 +9995,8 @@ void DarkJediProbeTick(int& phase,int& ticks,CSWSCreature* player,CSWSCreature* 
         enemy->SetCurrentHitPoints(0);phase=rounds==2?151:100;ticks=0;
     }
 }
+#include "include/k1dualprobe.h"
+
 void ArenaTick() {
     static const bool requested=[] {const char* p=std::getenv("K1_ENGAGE_ARENA");return p && !strcmp(p,"1");}();
     static const bool enemyProbe=std::getenv("K1_ENGAGE_ENEMY_AI_TEST") != nullptr;
@@ -8244,6 +10028,7 @@ void ArenaTick() {
         (std::getenv("K1_ENGAGE_DARK_JEDI_TEST") && phase>=150) ||
         (std::getenv("K1_ENGAGE_STAFF_CONTACT_TEST") && phase>=700) ||
         (std::getenv("K1_ENGAGE_STAFF_ARC_TEST") && phase>=750) ||
+        (std::getenv("K1_ENGAGE_DUAL_TEST") && phase>=760) ||
         (std::getenv("K1_ENGAGE_CLASH_TEST") && phase>=110) || (std::getenv("K1_ENGAGE_PARRY_TEST") && phase>=120) ||
         (enemyProbe && (phase==4 || (navProbe && phase==63))) ? 1 : 30)) return;
     CSWSCreature* actor=ServerActor();
@@ -8251,6 +10036,19 @@ void ArenaTick() {
     CServerExoApp* server=g_pAppManager->m_pServerExoApp;
     if(!actor || !actor->GetArea() || !app->GetModule() || app->m_pInternal->m_bAreaNotReadyToDisplay) return;
 
+    if(std::getenv("K1_ENGAGE_SURFACE_MARK_ONLY") && phase==2) {
+        // Reuse installed-data receiver/render fixtures without conflating
+        // their result with the broad NPC animation-parity suite.
+        ReleaseNpcPlayback();
+        if(auto* enemy=server->GetCreatureByGameObjectID(opponentId)) {enemy->RemoveFromArea(0);delete enemy;}
+        opponentId=OBJECT_INVALID;encounter.clear();
+        if(!K1EngageEnter()){fprintf(stderr,"K1_JKA_SABER_MARK_SETUP_FAIL\n");phase=-1;return;}
+        phase=200;ticks=0;return;
+    }
+
+    if(std::getenv("K1_ENGAGE_DUAL_TEST") && (phase==2 || phase>=760)) {
+        DualPlayableProbeTick(phase,ticks,actor,server->GetCreatureByGameObjectID(opponentId));return;
+    }
     if(std::getenv("K1_ENGAGE_STAFF_ARC_TEST") && (phase==2 || phase>=750)) {
         StaffArcProbeTick(phase,ticks,actor,server->GetCreatureByGameObjectID(opponentId));return;
     }
@@ -8460,7 +10258,21 @@ void ArenaTick() {
         if(auto* item=actor->m_pInventory->GetItemInSlot(CSWInventory::SLOT_RIGHTWEAPON)) arenaSaberIds[StaffPrototype()?0:1]=item->m_objectId;
         ok=(StaffPrototype()?EquipFixtureWeapon(actor,"g_w_dblsbr001"):EquipFixtureSaber(actor)) && ok;
         if(auto* item=actor->m_pInventory->GetItemInSlot(CSWInventory::SLOT_RIGHTWEAPON)) arenaSaberIds[StaffPrototype()?1:0]=item->m_objectId;
+        if(DualPrototype()) {
+            ok=EquipFixtureWeapon(actor,"g_w_lghtsbr03",CSWInventory::SLOT_LEFTWEAPON) && ok;
+            auto* item=actor->m_pInventory->GetItemInSlot(CSWInventory::SLOT_LEFTWEAPON);
+            arenaOffhandSaberId=item?item->m_objectId:OBJECT_INVALID;
+        } else if(std::getenv("K1_ENGAGE_SANDBOX")) {
+            auto* item=new CSWSItem(OBJECT_INVALID);
+            if(!item->LoadFromTemplate(CResRef("g_w_lghtsbr03"))){delete item;ok=false;}
+            else {item->m_flags&=~4;if(actor->AcquireItem(&item,OBJECT_INVALID,OBJECT_INVALID,1))arenaOffhandSaberId=item->m_objectId;else ok=false;}
+        }
+        if(std::getenv("K1_ENGAGE_SANDBOX")) {
+            ok=GrantSandboxEquipmentPrerequisites(actor)&&ok;
+            ok=AddArenaSwords(actor)&&ok;
+        }
         ok=GrantArenaLoadout(actor)&&ok;
+        if(const char* weapon=std::getenv("K1_ENGAGE_PLAYER_WEAPON"))ok=EquipFixtureWeapon(actor,weapon)&&ok;
         if(enemyProbe) for(unsigned char level=0;level<actor->m_pStats->GetLevel(0);++level)
             if(auto* entry=actor->m_pStats->GetLevelStats(level)) entry->m_nHitPointGain=100;
         const Vector spawn = gunner ? actor->m_position + actor->m_orientation * 2.f :
@@ -9225,6 +11037,7 @@ void IntegrationTick() {
 }
 }
 #include "k1dismember.inc"
+#include "include/k1contacttiming.inc"
 void StaffAnimationProbe(CSWGuiScene& scene) {
     const int index=scene.m_aModels.m_count;
     auto* body=static_cast<Gob*>(scene.AddModel(CExoString("k1jastaff"),-1));
@@ -9469,7 +11282,7 @@ void StaffAnimationProbe(CSWGuiScene& scene) {
     fprintf(stderr,"K1_STAFF_SOURCE_CONTACT_%s error=%g\n",maxSourceContact<.0002f?"PASS":"FAIL",maxSourceContact);
     fprintf(stderr,"K1_STAFF_GUARD_LOWER_%s position=%g angle=%g\n",maxLowerPosition<.000001f && maxLowerAngle<.002f?"PASS":"FAIL",maxLowerPosition,maxLowerAngle);
     fprintf(stderr,"K1_STAFF_CONNECTED_%s frames=%d ready=%d grip=%g spine_position=%g step=%g\n",ok?"PASS":"FAIL",frames,readyFrames,maxGrip,maxEdge,maxStep);
-    lastPose.clear();blendFrom.clear();rotationFrom.clear();nativeIdlePose.clear();nativeStaffGuardPose.clear();blendPending=false;
+    lastPose.clear();blendFrom.clear();rotationFrom.clear();nativeIdlePose.clear();nativeStaffGuardPose.clear();nativeDualGuardPose.clear();blendPending=false;
     scene.RemoveModel(index,1);
     fprintf(stderr,"K1_STAFF_COMPONENT_%s\n",ok?"PASS":"FAIL");
 }

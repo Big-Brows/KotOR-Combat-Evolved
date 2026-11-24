@@ -1,7 +1,11 @@
 # Apply the requested keyboard layout to this checkout's initialized test profile only.
+param([string]$ProfileDirectory, [switch]$MovementOnly)
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $profileDir = Join-Path $repo 'platforms/out/k1-test-user'
+if ($ProfileDirectory) { $profileDir = [IO.Path]::GetFullPath($ProfileDirectory) }
+$outputRoot = [IO.Path]::GetFullPath((Join-Path $repo 'platforms/out')) + [IO.Path]::DirectorySeparatorChar
+if (!$profileDir.StartsWith($outputRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Profile must stay inside this checkout''s generated output.' }
 $ini = Join-Path $profileDir 'swkotor.ini'
 $exe = Join-Path $repo 'platforms/out/k1-host-pc/windows/k1.exe'
 if (!(Test-Path -LiteralPath $ini)) { throw 'Launch the isolated test profile once before applying this layout.' }
@@ -24,12 +28,15 @@ if ($before -notmatch ('(?im)^SAVES=' + [regex]::Escape($saveAlias) + '\s*$')) {
 # Action221 previously claimed Left Shift before Action265 could register. Swap it to B (52),
 # the former walk key; Right Shift's Action222 remains the other action-bar modifier.
 $bindings = [ordered]@{Action281A=51; Action281B=54; Action284A=76; Action284B=53; Action265=24; Action221=52}
+if ($MovementOnly) { $bindings = [ordered]@{Action281A=51; Action281B=54; Action284A=76; Action284B=53} }
+if ($MovementOnly -and $before -notmatch '(?im)^\[Keymapping\]\s*$') { $before += "`r`n[Keymapping]`r`n" }
 $sections = [regex]::Matches($before, '(?ims)(^\[Keymapping\]\r?\n)(.*?)(?=^\[|\z)')
 if ($sections.Count -ne 1) { throw 'Expected exactly one initialized Keymapping section.' }
 $section = $sections[0]
 $body = $section.Groups[2].Value
 foreach ($key in $bindings.Keys) {
     $pattern = '(?im)^(' + $key + '=)[^\r\n]*'
+    if ($MovementOnly -and [regex]::Matches($body, $pattern).Count -eq 0) { $body += "$key=$($bindings[$key])`r`n"; continue }
     if ([regex]::Matches($body, $pattern).Count -ne 1) { throw "Expected exactly one $key binding." }
     $body = [regex]::Replace($body, $pattern, ('${1}' + $bindings[$key]))
 }
@@ -39,5 +46,6 @@ $backup = Join-Path $profileDir ('keymapping-before-' + [guid]::NewGuid().ToStri
 Copy-Item -LiteralPath $ini -Destination $backup
 [IO.File]::WriteAllText($ini, $after, [Text.UTF8Encoding]::new($false))
 if ([IO.File]::ReadAllText($ini) -cne $after) { throw 'Keymapping write verification failed; backup preserved.' }
-Write-Output 'Applied A/D movement, Z/C camera rotation and Left Shift to walk to the isolated test profile.'
-Write-Output ('Previous configuration preserved under platforms/out/k1-test-user/' + [IO.Path]::GetFileName($backup))
+Write-Output 'Applied A/D movement and Z/C camera rotation to the isolated profile.'
+if (!$MovementOnly) { Write-Output 'Applied Left Shift to walk.' }
+Write-Output ('Previous configuration preserved as ' + [IO.Path]::GetFileName($backup))

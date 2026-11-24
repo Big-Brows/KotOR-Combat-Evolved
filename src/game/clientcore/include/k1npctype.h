@@ -13,8 +13,14 @@ struct K1NpcType {
     int parryPercent;
     int chainContinuePercent;
     long long attackRestUs;
+    bool dual=false;
+    bool red=false;
+    bool blue=false;
 };
 constexpr K1NpcType k1DarkJediTypes[] = {
-    {"dark-jedi", "k1arena_dark", "k1darktest", "k1jadark", false, .82f, 3, 25, 85, 250000},
-    {"dark-jedi-staff", "k1arena_darkstaff", "k1darkstaff", "k1jadstaff", true, .92f, 4, 20, 100, 150000}
+    {"dark-jedi", "k1arena_dark", "k1darktest", "k1jadark", false, .85f, 3, 25, 85, 250000},
+    {"dark-jedi-staff", "k1arena_darkstaff", "k1darkstaff", "k1jadstaff", true, .85f, 4, 20, 100, 150000},
+    {"dark-jedi-dual", "k1arena_darkdual", "k1darkdual", "k1jaddual", false, .75f, 3, 25, 85, 250000, true},
+    {"dark-jedi-red", "k1arena_darkred", "k1darkred", "k1jadred", false, 1.f, 3, 25, 85, 250000, false, true}
+    ,{"dark-jedi-blue", "k1arena_darkblue", "k1darkblue", "k1jadblue", false, 1.f, 4, 25, 85, 250000, false, false, true}
 };

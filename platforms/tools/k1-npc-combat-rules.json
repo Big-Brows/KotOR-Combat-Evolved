@@ -1,0 +1,434 @@
+{
+  "hp_tiers": [
+    {
+      "min_hp": 1,
+      "max_hp": 49,
+      "poise": 60,
+      "parry": 10
+    },
+    {
+      "min_hp": 50,
+      "max_hp": 74,
+      "poise": 80,
+      "parry": 15
+    },
+    {
+      "min_hp": 75,
+      "max_hp": null,
+      "poise": 100,
+      "parry": 20
+    }
+  ],
+  "default_stance": "Yellow",
+  "faction_stances": {
+    "Gamorrean": "Red"
+  },
+  "overrides": [
+    {
+      "npc": "Czerka Thug",
+      "weapon": "Double Sword",
+      "variants": null,
+      "parry": 25,
+      "stance": null
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Double-bladed Lightsaber",
+      "variants": [
+        4
+      ],
+      "parry": 25,
+      "stance": null
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Double-bladed Lightsaber",
+      "variants": [
+        5
+      ],
+      "parry": 30,
+      "stance": null
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Double-bladed Lightsaber",
+      "variants": [
+        6
+      ],
+      "parry": 30,
+      "stance": null
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Lightsaber",
+      "variants": [
+        3
+      ],
+      "parry": null,
+      "stance": "Blue"
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Lightsaber",
+      "variants": [
+        4
+      ],
+      "parry": null,
+      "stance": "Red"
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Lightsaber",
+      "variants": [
+        8
+      ],
+      "parry": null,
+      "stance": "Blue"
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Lightsaber",
+      "variants": [
+        9
+      ],
+      "parry": 25,
+      "stance": "Blue"
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Lightsaber",
+      "variants": [
+        10
+      ],
+      "parry": 25,
+      "stance": null
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Lightsaber",
+      "variants": [
+        11
+      ],
+      "parry": 25,
+      "stance": "Red"
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Lightsaber",
+      "variants": [
+        12
+      ],
+      "parry": 25,
+      "stance": null
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Lightsaber",
+      "variants": [
+        13
+      ],
+      "parry": 30,
+      "stance": null
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Lightsaber",
+      "variants": [
+        16
+      ],
+      "parry": 25,
+      "stance": "Blue"
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Lightsaber",
+      "variants": [
+        17
+      ],
+      "parry": 30,
+      "stance": "Red"
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Lightsaber",
+      "variants": [
+        18
+      ],
+      "parry": 30,
+      "stance": null
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Lightsaber",
+      "variants": [
+        19
+      ],
+      "parry": 30,
+      "stance": null
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Lightsaber",
+      "variants": [
+        20
+      ],
+      "parry": 35,
+      "stance": "Red"
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Lightsaber + Lightsaber",
+      "variants": null,
+      "parry": 30,
+      "stance": null
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Lightsaber + Short Lightsaber",
+      "variants": [
+        3,
+        4,
+        5
+      ],
+      "parry": 30,
+      "stance": null
+    },
+    {
+      "npc": "Dark Jedi",
+      "weapon": "Lightsaber + Short Lightsaber",
+      "variants": [
+        6,
+        7
+      ],
+      "parry": 35,
+      "stance": null
+    },
+    {
+      "npc": "Dark Jedi Apprentice",
+      "weapon": "Lightsaber",
+      "variants": [
+        3
+      ],
+      "parry": 30,
+      "stance": null
+    },
+    {
+      "npc": "Dark Jedi Master",
+      "weapon": "Double-bladed Lightsaber",
+      "variants": null,
+      "parry": 40,
+      "stance": null
+    },
+    {
+      "npc": "Dark Jedi Master",
+      "weapon": "Lightsaber",
+      "variants": [
+        1
+      ],
+      "parry": 30,
+      "stance": "Red"
+    },
+    {
+      "npc": "Dark Jedi Master",
+      "weapon": "Lightsaber",
+      "variants": [
+        2
+      ],
+      "parry": 30,
+      "stance": null
+    },
+    {
+      "npc": "Dark Jedi Master",
+      "weapon": "Lightsaber",
+      "variants": [
+        3
+      ],
+      "parry": 35,
+      "stance": "Blue"
+    },
+    {
+      "npc": "Mandalorian Captain",
+      "weapon": "Heavy Repeating Blaster",
+      "variants": [
+        2
+      ],
+      "parry": 25,
+      "stance": null
+    },
+    {
+      "npc": "Mandalorian Commander",
+      "weapon": "Vibro Sword",
+      "variants": null,
+      "parry": 30,
+      "stance": "Red"
+    },
+    {
+      "npc": "Rakatan Elite Warrior",
+      "weapon": "Vibro Double Blade",
+      "variants": null,
+      "parry": 25,
+      "stance": null
+    },
+    {
+      "npc": "Rakatan Elite Warrior",
+      "weapon": "Vibro Sword + Vibro Sword",
+      "variants": null,
+      "parry": 25,
+      "stance": null
+    },
+    {
+      "npc": "Rakatan Elite Warrior",
+      "weapon": "Vibro Sword + Vibroblade",
+      "variants": [
+        1,
+        2
+      ],
+      "parry": 25,
+      "stance": null
+    },
+    {
+      "npc": "Elite Warrior",
+      "weapon": "Repeating Blaster",
+      "variants": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "parry": 25,
+      "stance": null
+    },
+    {
+      "npc": "Holy Warrior",
+      "weapon": "Gaffi Stick",
+      "variants": [
+        2
+      ],
+      "parry": 25,
+      "stance": null
+    },
+    {
+      "npc": "Sand People Chieftain",
+      "weapon": "Gaffi Stick",
+      "variants": null,
+      "parry": 30,
+      "stance": null
+    },
+    {
+      "npc": "Sand People Warrior",
+      "weapon": "Repeating Blaster",
+      "variants": null,
+      "parry": 25,
+      "stance": null
+    },
+    {
+      "npc": "Sith Acolyte",
+      "weapon": "Lightsaber",
+      "variants": [
+        1
+      ],
+      "parry": 25,
+      "stance": null
+    },
+    {
+      "npc": "Sith Apprentice",
+      "weapon": "Double-bladed Lightsaber",
+      "variants": null,
+      "parry": 30,
+      "stance": null
+    },
+    {
+      "npc": "Sith Apprentice",
+      "weapon": "Lightsaber",
+      "variants": [
+        8
+      ],
+      "parry": 30,
+      "stance": null
+    },
+    {
+      "npc": "Sith Apprentice",
+      "weapon": "Lightsaber + Short Lightsaber",
+      "variants": null,
+      "parry": 30,
+      "stance": null
+    },
+    {
+      "npc": "Sith Elite Trooper",
+      "weapon": "Blaster Rifle",
+      "variants": [
+        6
+      ],
+      "parry": 25,
+      "stance": null
+    },
+    {
+      "npc": "Sith Elite Warrior",
+      "weapon": "Double Sword",
+      "variants": null,
+      "parry": 25,
+      "stance": null
+    },
+    {
+      "npc": "Sith Governor",
+      "weapon": "Vibro Double Blade",
+      "variants": null,
+      "parry": 30,
+      "stance": null
+    },
+    {
+      "npc": "Sith Grenadier",
+      "weapon": "Blaster Pistol",
+      "variants": null,
+      "parry": 25,
+      "stance": null
+    },
+    {
+      "npc": "Sith Heavy Trooper",
+      "weapon": "Heavy Repeating Blaster",
+      "variants": [
+        4,
+        5
+      ],
+      "parry": 25,
+      "stance": null
+    },
+    {
+      "npc": "Sith Lord",
+      "weapon": "Lightsaber",
+      "variants": null,
+      "parry": 35,
+      "stance": "Blue"
+    },
+    {
+      "npc": "Sith Master",
+      "weapon": "Lightsaber",
+      "variants": [
+        2
+      ],
+      "parry": 40,
+      "stance": null
+    },
+    {
+      "npc": "Sith Thug Leader",
+      "weapon": "Lightsaber",
+      "variants": null,
+      "parry": 35,
+      "stance": "Red"
+    },
+    {
+      "npc": "Trandoshan",
+      "weapon": "Vibro Sword + Vibro Sword",
+      "variants": null,
+      "parry": 30,
+      "stance": null
+    },
+    {
+      "npc": "Wookiee Thug",
+      "weapon": "Wookiee Warblade",
+      "variants": null,
+      "parry": 25,
+      "stance": null
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 # Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
+# Updated for KotOR:CE v0.2 on 2026-11-24; see docs/LOCAL_CHANGES.md.
 # Third-party code the Windows build compiles from source (the macOS and Linux hosts take it from the
 # system): SDL2, FreeType and zlib, all static, so the executable needs no DLL of ours. GL and GLU are
 # Windows' own opengl32 / glu32. The Visual Studio projects the archives ship are deleted on extraction,
@@ -73,7 +74,7 @@ if(CMAKE_TOOLCHAIN_FILE)
 endif()
 if(K2P_PRIVATE_PATHS)
   list(APPEND _k2_sdl_args
-    # Native Windows uses desktop OpenGL; omit unused EGL/GLES/offscreen drivers.
+    # Preserve the published v0.1 desktop-only dependency selection.
     "-DSDL_OPENGLES=OFF" "-DSDL_OFFSCREEN=OFF" "-DSDL_VULKAN=OFF"
     "-DCMAKE_TRY_COMPILE_CONFIGURATION=Release"
     "-DCMAKE_C_FLAGS_RELWITHDEBINFO=/O2 /Ob1 /DNDEBUG"

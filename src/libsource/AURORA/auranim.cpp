@@ -1459,7 +1459,9 @@ void Gob::Animate(float fDelta)
 #if KOTOR1 && defined(K2_UI_PC)
     // The adapter consumes freshly evaluated locals. Applying it to a culled or
     // empty pose compounds the previous frame's pelvis/torso correction.
-    if (bPoseEvaluated) K1EngagePose(this, fDelta);
+    if (bPoseEvaluated) {
+        K1EngagePose(this, fDelta);
+    }
 #endif
     // Nothing left playing: give the part tree its own tick and refresh the bounds, unless a scene that is
     // animating, or a model asking for the pass, says otherwise.

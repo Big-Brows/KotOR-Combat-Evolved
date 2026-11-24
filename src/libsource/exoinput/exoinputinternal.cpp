@@ -1,4 +1,5 @@
 // Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
+// Updated for KotOR:CE v0.2 on 2026-11-24; see docs/LOCAL_CHANGES.md.
 #include "k2stdint.h"
 #include "port/sdlapi.h"
 #include "exoinputinternal.h"
@@ -1671,7 +1672,7 @@ CExoArrayList<CExoInputEvent> CExoInputInternal::GetEvents(int& nCount, int nInp
             const_cast<char*>("E:/Work/aspyr/KOTOR_Android/GooglePlay/app/src/main/cpp/src/libsource/exoinput/exoinputinternal.cpp"),
 #else
             1543,
-            const_cast<char*>("source/exoinputinternal.cpp"),
+            const_cast<char*>("libsource/exoinput/exoinputinternal.cpp"),
 #endif
             "CExoInputInternal::GetEvents() Invalid InputClass parameter");
         return CExoArrayList<CExoInputEvent>();

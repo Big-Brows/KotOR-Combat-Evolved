@@ -1,4 +1,5 @@
 // Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
+// Updated for KotOR:CE v0.2 on 2026-11-24; see docs/LOCAL_CHANGES.md.
 // k1sdl.cpp -- what Aspyr's SDL fork did for KOTOR 1 that stock SDL2 does not (K2P_GAME=k1).
 //
 // K1's SDL_main (src/port/Mac/MacMain.cpp) owns the window: it asks for a GLES 2 context with a 565
@@ -282,6 +283,13 @@ std::vector<std::pair<unsigned char, unsigned char>> s_keyQueue;   // (DIK code,
 int KeyWatch(void*, SDL_Event* e)
 {
 #if defined(K2_UI_PC)
+    // SDL may never deliver the releases after focus leaves the window.
+    // Release custom movement/guard as well as the native keyboard state.
+    if(e->type==SDL_WINDOWEVENT && e->window.event==SDL_WINDOWEVENT_FOCUS_LOST) {
+        K1EngageReleaseHeldInput();
+    }
+    if(e->type==SDL_MOUSEBUTTONDOWN && e->button.button==SDL_BUTTON_MIDDLE)
+        K1EngageCycleStance();
     if((e->type==SDL_KEYDOWN&&!e->key.repeat)||e->type==SDL_KEYUP)
         K1EngageKey(int(e->key.keysym.scancode),e->type==SDL_KEYDOWN);
 #endif
@@ -519,15 +527,15 @@ void DoAction(SDL_Window* pWindow, int nFrame, const std::string& sAction, const
         e.button.y = y;
         SDL_PushEvent(&e);
         if (sAction == "click") s_queue.push_back({nFrame + 3, "mouseup:" + sArg});
-    } else if (sAction == "rdown" || sAction == "rup" || sAction == "ldown" || sAction == "lup") {
+    } else if (sAction == "rdown" || sAction == "rup" || sAction == "ldown" || sAction == "lup" || sAction == "mdown" || sAction == "mup") {
         int x = 0, y = 0;
         sscanf(sArg.c_str(), "%d,%d", &x, &y);
         SDL_Event e;
         memset(&e, 0, sizeof e);
-        bool bDown = sAction == "rdown" || sAction == "ldown";
+        bool bDown = sAction == "rdown" || sAction == "ldown" || sAction == "mdown";
         e.type = bDown ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
         e.button.windowID = SDL_GetWindowID(pWindow);
-        e.button.button = sAction[0] == 'r' ? SDL_BUTTON_RIGHT : SDL_BUTTON_LEFT;
+        e.button.button = sAction[0] == 'm' ? SDL_BUTTON_MIDDLE : (sAction[0] == 'r' ? SDL_BUTTON_RIGHT : SDL_BUTTON_LEFT);
         e.button.state = bDown ? SDL_PRESSED : SDL_RELEASED;
         e.button.clicks = 1;
         e.button.x = x;
@@ -953,9 +961,31 @@ int PollPadEvent(SDL_Event* e)
 }
 } // namespace
 
+// SDL mouse-look capture ends when menus or guard input release relative mode.
+// Fullscreen must also confine the ordinary pointer on multi-monitor desktops.
+static void UpdateFullscreenMouseGrab()
+{
+#ifndef K2P_MOBILE_HOST
+    if (!Android_Window) return;
+    const Uint32 flags = SDL_GetWindowFlags(Android_Window);
+    const bool grab = (flags & SDL_WINDOW_FULLSCREEN) && (flags & SDL_WINDOW_INPUT_FOCUS) &&
+                      !(flags & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN));
+    if ((SDL_GetWindowMouseGrab(Android_Window) == SDL_TRUE) != grab)
+        SDL_SetWindowMouseGrab(Android_Window, grab ? SDL_TRUE : SDL_FALSE);
+    static int previous = -1;
+    if (previous != int(grab)) {
+        fprintf(stderr,"K1_MOUSE_CONFINEMENT_%s requested=%d actual=%d focused=%d fullscreen=%d\n",
+            (SDL_GetWindowMouseGrab(Android_Window)==SDL_TRUE)==grab?"PASS":"FAIL",int(grab),
+            SDL_GetWindowMouseGrab(Android_Window)==SDL_TRUE,!!(flags & SDL_WINDOW_INPUT_FOCUS),!!(flags & SDL_WINDOW_FULLSCREEN));
+        previous = int(grab);
+    }
+#endif
+}
+
 extern "C" int SDL_PollEvent(SDL_Event* e)
 {
     int r = PollPadEvent(e);
+    UpdateFullscreenMouseGrab();
     if (r && e && PadTrace()) TracePad("main", e);
     return r;
 }

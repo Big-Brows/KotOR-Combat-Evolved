@@ -371,7 +371,13 @@ Gob::~Gob()
     g_nCountOfGobs--;
 
     DoEvent(const_cast<char*>("Dying"), 0);
+#if KOTOR1 && defined(K2_UI_PC)
+    // Destruction must release every run without querying gameplay ownership:
+    // the owning NPC map itself may currently be destroying sampler models.
+    PlayAnimation(0, 1.0f, AnimRun::kAnimRemove, 0.0f);
+#else
     PlayAnimation(0, 1.0f, 0, 0.0f);
+#endif
     SetScene(0);
     SetBehavior(0);
 

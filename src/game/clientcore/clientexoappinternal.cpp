@@ -1,4 +1,5 @@
 // Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
+// Updated for KotOR:CE v0.2 on 2026-11-24; see docs/LOCAL_CHANGES.md.
 #include "k2stdint.h"
 #include "port/k1engage.h"
 #include "port/sdlapi.h"
@@ -858,7 +859,7 @@ void CClientExoAppInternal::UpdateSoundEngine()
             CSWBehaviorCameraCombat* pCombat = static_cast<CSWBehaviorCameraCombat*>(pCamera->GetBehavior(BEHAVIOR_CAMERA_COMBAT));
             if (pCombat != 0) {
                 CSWCCreature* pChar = m_pParty->GetCharacter(0);
-#if KOTOR1  // the party leader is used without a null check
+#if KOTOR1 && !defined(K2_FIX_ENGINE_BUGS)  // original K1 assumes a party leader
                 {
 #else
                 if (pChar != 0) {
@@ -1240,6 +1241,7 @@ void CClientExoAppInternal::DestroyWorldJournal()
 
 void CClientExoAppInternal::UnloadModule()
 {
+    if(getenv("K1_PRESENTATION_TEST"))fprintf(stderr,"K1_MENU_PHASE unload_begin\n");
     SetClearColor(const_cast<char*>("0 0 0"));
 
     m_playerCreatureId = CGameObjectArray::INVALIDOBJID;
@@ -1266,6 +1268,7 @@ void CClientExoAppInternal::UnloadModule()
         return;
     delete m_pModule;
     m_pModule = 0;
+    if(getenv("K1_PRESENTATION_TEST"))fprintf(stderr,"K1_MENU_PHASE module_deleted\n");
 
     g_pAppManager->GetObjectTableManager(0)->RemovePlayer(0);
 
@@ -1281,7 +1284,11 @@ void CClientExoAppInternal::UnloadModule()
     if (m_pQuestJournal)
         m_pQuestJournal->ClearAll();
     if (m_pInGameGui)
+    {
+        if(getenv("K1_PRESENTATION_TEST"))fprintf(stderr,"K1_MENU_PHASE gui_shutdown_begin\n");
         m_pInGameGui->ShutDown();
+        if(getenv("K1_PRESENTATION_TEST"))fprintf(stderr,"K1_MENU_PHASE gui_shutdown_end\n");
+    }
     if (m_pPlayerControl)
         m_pPlayerControl->Initialize();
 
@@ -1636,6 +1643,7 @@ extern "C" void k2host_gl_trace_main_menu(void);   // platforms/shim/shim_window
 
 void CClientExoAppInternal::DisplayMainMenu(int n)
 {
+    if(getenv("K1_PRESENTATION_TEST"))fprintf(stderr,"K1_MENU_PHASE display_begin exists=%d\n",m_pMainMenuPanel && m_pSWGuiManager->PanelExists(m_pMainMenuPanel));
     if (m_pMainMenuPanel &&
         m_pSWGuiManager->PanelExists(static_cast<CSWGuiPanel*>(m_pMainMenuPanel)))
         return;
@@ -1672,8 +1680,10 @@ void CClientExoAppInternal::DisplayMainMenu(int n)
 #endif
 
     m_pMainMenuPanel = new CSWGuiMainMenu(m_pSWGuiManager);
+    if(getenv("K1_PRESENTATION_TEST"))fprintf(stderr,"K1_MENU_PHASE constructed\n");
     SetInputClass(INPUTCLASS_GUI, 1);
     m_pSWGuiManager->AddPanel(static_cast<CSWGuiPanel*>(m_pMainMenuPanel), 2, 1);
+    if(getenv("K1_PRESENTATION_TEST"))fprintf(stderr,"K1_MENU_PHASE attached\n");
 #ifdef K2_HOST_BUILD
     k2host_gl_trace_main_menu();
 #endif
@@ -9964,9 +9974,7 @@ hilited:;
 #else
                             nPathNumbers[i] = static_cast<unsigned int>(AurAddDrawableSquare(
                                 reinterpret_cast<float*>(vDraw), 0xffffffff,
-                                "source/"
-                                "app/src/main/cpp/kotor2/CODE/game/clientcore/"
-                                "clientexoappinternal.cpp", 13776));
+                                "game/clientcore/clientexoappinternal.cpp", 13776));
 #endif
                             if (i + 2 >= nHalf)
                                 break;

@@ -1019,6 +1019,9 @@ int CSWSCreature::IsSpellCastingAnimation(unsigned short nAnimation)
 // itself behind a move-to-point.
 #if KOTOR1 && defined(K2_UI_PC)
 static bool IsEngageHumanoidEnemy(CSWSCreature* enemy, unsigned long long target) {
+    // Native ranged/natural/unarmed sandbox actors keep KotOR's own spacing.
+    // A humanoid skeleton alone does not establish adapted combat ownership.
+    if (K1EngageEnemyNativeControl(enemy)) return false;
     if (!K1EngageEnemyAIActive(target) || enemy->m_bInParty || enemy->m_bPlayerCharacter ||
         enemy->m_bPassiveAttackBehaviour || enemy->m_pStats->m_nRace == CSWRace::CRACE_DROID)
         return false;
@@ -1137,6 +1140,9 @@ int CSWSCreature::AIActionPhysicalAttacks(CSWSObjectActionNode* pNode)
 
     int bCutsceneAttack = pNode->m_args.m_bAttackCutscene;
     unsigned long long oidTarget = pNode->m_args.m_attackQueuedTargetId;
+#if KOTOR1 && defined(K2_UI_PC)
+    if(K1EngageSandboxBlocksPlayerTarget(m_objectId,oidTarget))return ACTION_COMPLETE;
+#endif
     int nAttackKind = pNode->m_args.m_attackKind;
     int nAnimationId = pNode->m_args.m_attackAnimationId;
     int nPauseTime = pNode->m_args.m_attackPauseTime;
@@ -2766,6 +2772,7 @@ void CSWSCreature::SignalMeleeDamage(unsigned long long oidTarget, int nNumAttac
             pEffect->SetInteger(21, 1);
 #if KOTOR1 && defined(K2_UI_PC)
             K1EngageTagMeleeDamage(m_objectId,oidTarget,pEffect);
+            K1EngageContactEffectQueued(m_objectId,oidTarget,pEffect);
 #endif
             pAIMaster->AddEventDeltaTime(0, nDelay, m_objectId, oidTarget,
                                          CServerAIMaster::EVENT_APPLY_EFFECT, pEffect);

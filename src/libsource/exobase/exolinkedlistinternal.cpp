@@ -1,11 +1,12 @@
 // Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
+// Updated for KotOR:CE v0.2 on 2026-11-24; see docs/LOCAL_CHANGES.md.
 #include "exolinkedlistinternal.h"
 #include "exobase.h"
 
 #if KOTOR1  // Source path the debug warnings below report
 #define EXOLL_FILE const_cast<char*>("E:/Work/aspyr/KOTOR_Android/GooglePlay/app/src/main/cpp/src/libsource/exobase/exolinkedlistinternal.cpp")
 #else
-#define EXOLL_FILE const_cast<char*>("source/exolinkedlistinternal.cpp")
+#define EXOLL_FILE const_cast<char*>("libsource/exobase/exolinkedlistinternal.cpp")
 #endif
 
 CExoLinkedListInternal::CExoLinkedListInternal()

@@ -1,3 +1,5 @@
+#include <cstdio>
+#include <cstdlib>
 #include "k2stdint.h"
 #include "nwstrigger.h"
 #include "CExoArrayListImpl.h"
@@ -581,7 +583,11 @@ void CSWSTrigger::OnEnterMine(int nParam)
     CSWSCreature* pEnterer =
         g_pAppManager->m_pServerExoApp->GetCreatureByGameObjectID(m_oidEnteringObject);
     if (pEnterer == 0) return;
-    if (GetCanFireMineOnObject(pEnterer->m_objectId, nParam) == 0) return;
+    const int canFire=GetCanFireMineOnObject(pEnterer->m_objectId,nParam);
+#if KOTOR1
+    if(std::getenv("K1_GRENADE_MINE_TEST"))fprintf(stderr,"K1_MINE_ENTER mine=%llu actor=%llu can_fire=%d param=%d faction=%u actor_faction=%d\n",m_objectId,pEnterer->m_objectId,canFire,nParam,m_nFaction,pEnterer->m_pStats->m_factionId);
+#endif
+    if(canFire==0)return;
 
     unsigned long long oidKey = pEnterer->GetItemRepository(1)->FindItemWithTag(m_keyName);
     if (oidKey == OBJECT_INVALID) {

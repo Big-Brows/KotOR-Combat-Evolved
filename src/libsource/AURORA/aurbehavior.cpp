@@ -16,6 +16,9 @@ extern int g_bMouseCameraRotateToggleIos;
 #include "aurscene.h"
 #include "Matrix.h"
 #include "Quaternion.h"
+#if KOTOR1 && defined(K2_UI_PC)
+#include "port/k1engage.h"
+#endif
 
 // Header-free equivalents of std::min/std::max: <algorithm> drags in <math.h>, which conflicts
 // with the throw()-specified CRT declarations below.
@@ -277,6 +280,9 @@ void CAurBehaviorAttach::UpdateGobPosition() {
     // let the owner react. The owner is held in a local across the GetWorld call.
     Gob* pOwner = static_cast<Gob*>(m_pOwner);
     m_pAttachedPart->GetWorld(pOwner->m_vPosition, pOwner->m_qOrientation);
+#if KOTOR1 && defined(K2_UI_PC)
+    K1EngageAlignSword(pOwner);
+#endif
     pOwner->DoEvent(const_cast<char*>("UpdateDependentPosition"), 0);
 }
 
@@ -319,6 +325,9 @@ int CAurBehaviorAttach::Control(float fParam) {
     }
 
     m_pAttachedPart->GetWorld(pGobOwner->m_vPosition, pGobOwner->m_qOrientation);
+#if KOTOR1 && defined(K2_UI_PC)
+    K1EngageAlignSword(pGobOwner);
+#endif
     return 1;
 }
 
@@ -439,6 +448,9 @@ CAurBehaviorAttach::CAurBehaviorAttach(CAurObject* pObject, CAurObject* pAttachT
     // both the re-parent and the resulting transform.
     CAurPart* pWorldPart = m_pAttachedPart;
     pWorldPart->GetWorld(pOwner->m_vPosition, pOwner->m_qOrientation);
+#if KOTOR1 && defined(K2_UI_PC)
+    K1EngageAlignSword(pOwner);
+#endif
     pOwner->DoEvent(const_cast<char*>("UpdateDependentPosition"), 0);
 #if !KOTOR1  // K1 sends no `_EmitterTarget` event
     pOwner->DoEvent(const_cast<char*>("_EmitterTarget"), 0);

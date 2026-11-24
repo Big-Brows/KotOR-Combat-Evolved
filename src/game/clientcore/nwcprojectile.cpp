@@ -1,4 +1,5 @@
 #include "nwcprojectile.h"
+#include "port/k1engage.h"
 #include "nwscriptconst.h"
 #include "appmanager.h"
 #include "clientexoapp.h"
@@ -568,6 +569,15 @@ void CSWCProjectile::SetBehaviorListDoubleBallistic()
 void CSWCProjectile::SetBehaviorListTripleBallistic(int nCount)
 {
     K2_UNUSED(nCount);
+#if KOTOR1
+    // Combat-mode thrown grenades have one landing, with no post-landing bounces.
+    if(K1EngageEnabled() && nCount==PROJECTILE_TYPE_GRENADE) {
+        m_oidTarget=CGameObjectArray::INVALIDOBJID;
+        SetBehaviorListBallistic();
+        if(std::getenv("K1_GRENADE_MINE_TEST"))fprintf(stderr,"K1_GRENADE_FLIGHT spell=%d segments=1 duration=%u landing=%g,%g,%g\n",m_nProjectileSpellId,m_desiredPosTimer2,m_desiredPosition.x,m_desiredPosition.y,m_desiredPosition.z);
+        return;
+    }
+#endif
     CAurScene* pScene = g_pAppManager->m_pClientExoApp->GetModule()->m_pArea->m_pScene;
 
     Vector vHit;
@@ -1627,6 +1637,9 @@ void CSWCProjectile::AIUpdate()
                         m_currentAnimation = CSWCAnimBaseProjectile::PROJECTILE_ANIMATION_IMPACT;
 
                     m_bArrived = 1;
+#if KOTOR1
+                    if(std::getenv("K1_GRENADE_MINE_TEST"))fprintf(stderr,"K1_GRENADE_LANDED spell=%d position=%g,%g,%g\n",m_nProjectileSpellId,m_position.x,m_position.y,m_position.z);
+#endif
 
                     if (m_pSoundSource != 0) {
                         m_pSoundSource->Stop();

@@ -1371,11 +1371,13 @@ void CSWCCreature::ActionInitiateCombatMode(unsigned int n, CSWCCreature* p) {
 }
 
 void CSWCCreature::UnloadModel(unsigned char a) {
+    if(a==CSWCAnimBase::ANIM_MODEL_BODY)K1EngageBeforeBodyUnload(this);
     if (m_pModel)
         m_pModel->UnloadModel(a);
 }
 
 void CSWCCreature::UnloadModel() {
+    K1EngageBeforeBodyUnload(this);
     static_cast<CSWCObject*>(this)->CSWCObject::HidePopUpBubble();  // idiom-exempt: the header models these classes flat.
     if (m_pModel) {
         m_pModel->UnloadModel();
@@ -5728,6 +5730,10 @@ unsigned short CSWCCreature::ResolveReactionAnimation(unsigned short a, unsigned
 // K1: after a body or head rebuild the current animation is replayed, or the looping one when
 // the current is a stationary one-shot, and the alignment tint is reapplied.
 int CSWCCreature::SetAppearance(CCAppearanceInfo* pInfo, unsigned char flags, int b) {
+#if defined(K2_UI_PC)
+    CCAppearanceInfo sandboxAppearance=*pInfo;
+    if(K1EngageSandboxAppearance(this,&sandboxAppearance))pInfo=&sandboxAppearance;
+#endif
     DetachVisualEffects();
     unsigned short nLooping = 0;
     unsigned short nCurrent = 0;
@@ -7165,7 +7171,11 @@ void CSWCCreature::GetMines(CExoArrayList<CSWGuiInterfaceAction>& list)
         list.m_pArray[nOldCount].m_sName = sName;
         list.m_pArray[nOldCount].m_pfnAction = &CSWCCreature::ActionMenuSetMine;
         list.m_pArray[nOldCount].m_nObjectId = m_objectId;
+#if KOTOR1 && defined(K2_UI_PC)
+        list.m_pArray[nOldCount].m_nActionId = static_cast<unsigned int>(g_pAppManager->m_pClientExoApp->ServerToClientObjectId(pItem->m_objectId)) | CSWGuiInterfaceAction::ACTION_ID_ITEM;
+#else
         list.m_pArray[nOldCount].m_nActionId = static_cast<unsigned int>(pItem->m_objectId) | CSWGuiInterfaceAction::ACTION_ID_ITEM;
+#endif
         list.m_pArray[nOldCount].m_resRef = pItem->GetIcon();
 #if KOTOR1  // K1 puts the stack count in the entry, not the label
         list.m_pArray[nOldCount].m_nCount = pItem->m_stackCount;

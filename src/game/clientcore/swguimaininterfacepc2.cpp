@@ -5748,7 +5748,10 @@ void CSWGuiTargetActionMenu::DoTargetAction(int nIndex, int nTarget) {
                 bResumeCombat = 0;
             else
                 bResumeCombat = (m_actionRow == 3);
-            pPlayer->ClearAllQueuedCombatActions();
+#if KOTOR1 && defined(K2_UI_PC)
+            if(!K1EngagePlanning() && !K1EngageEngaged())
+#endif
+                pPlayer->ClearAllQueuedCombatActions();
             if (m_actionRow == 3 || (m_actionRow == 0 && pAction->m_nActionId == CSWGuiInterfaceAction::ACTION_ID_BASH)) {
                 CSWGuiMainInterface* pInterface = m_pInterface;
                 K2_ASSUME(pInterface != 0);   // the owning main interface, set by Initialize(this)
@@ -5771,7 +5774,7 @@ void CSWGuiTargetActionMenu::DoTargetAction(int nIndex, int nTarget) {
         m_widgets[nIndex].m_fPulseTimer = 0.1f;
         if (!(pPlayer->m_nStateFlags & 1)
 #if KOTOR1 && defined(K2_UI_PC)
-            && !K1EngagePlanning()
+            && !K1EngagePlanning() && !K1EngageEngaged()
 #endif
         ) {
             if (bResumeCombat)
@@ -6637,7 +6640,10 @@ void CSWGuiMainInterface::DoPersonalAction(int nIndex, int nTarget) {
             if (pApp->GetAutoPaused())
                 pApp->GetInGameGui()->SetPaused(1, 10);
         } else {
-            pPlayer->ClearAllQueuedCombatActions();
+#if KOTOR1 && defined(K2_UI_PC)
+            if(!K1EngagePlanning() && !K1EngageEngaged())
+#endif
+                pPlayer->ClearAllQueuedCombatActions();
             m_pGuiManager->PlayGuiSound(GUISOUND_ACTION_MENU_USE);
         }
         (pTarget->*pAction->m_pfnAction)(pAction->m_nActionId, pPlayer);
@@ -6645,7 +6651,7 @@ void CSWGuiMainInterface::DoPersonalAction(int nIndex, int nTarget) {
         m_personalActionWidgets[nIndex].m_fPulseTimer = 0.1f;
         if (!(pPlayer->m_nStateFlags & 1) && pPlayer->GetServerCreature()
 #if KOTOR1 && defined(K2_UI_PC)
-            && !K1EngagePlanning()
+            && !K1EngagePlanning() && !K1EngageEngaged()
 #endif
         )
             pPlayer->GetServerCreature()->ClearAllActions(0);

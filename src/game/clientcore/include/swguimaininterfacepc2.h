@@ -738,6 +738,7 @@ public:
     // Local PC prototype control; original reconstructed member offsets stay intact.
     CSWGuiButton m_btnEngage;
     K1PoiseWeaponView m_poiseWeapon;
+    K1PoiseWeaponView m_poiseOffhand;
     CSWGuiLabel m_poisePercent;
     K1ParryReticle m_parryReticle;
     void OnEngageHover(CSWGuiControl* control);

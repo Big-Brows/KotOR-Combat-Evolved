@@ -2597,6 +2597,9 @@ int CSWSObject::AIActionSwitchWeapons(CSWSObjectActionNode* pNode) {
 extern int OverrideReputation;
 
 int CSWSObject::GetReputation(unsigned long long objectId, int a) {
+#if KOTOR1 && defined(K2_UI_PC)
+    if(K1EngageSandboxBlocksPlayerTarget(m_objectId,objectId))return 50;
+#endif
     int nTheirFaction;
     int nMyFaction;
     if (OverrideReputation != -1)

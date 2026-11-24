@@ -10921,6 +10921,9 @@ void CSWSCreature::EventHandler(unsigned int nEventType, unsigned long long nCal
                 m_nItemCastSpellLevel = pImpact->m_nCasterLevel;
                 CalculateLastSpellProjectileTime(0);
             }
+#if KOTOR1
+            if(std::getenv("K1_GRENADE_MINE_TEST"))fprintf(stderr,"K1_GRENADE_IMPACT spell=%u target=%llu position=%g,%g,%g\n",pImpact->m_nSpellId,pImpact->m_targetId,m_castPosition.x,m_castPosition.y,m_castPosition.z);
+#endif
             g_pVirtualMachine->RunScript(&pImpact->m_sScript, m_objectId, 1);
             SetEffectSpellId(static_cast<unsigned int>(-1));
             m_nImpactSpellId = -1;
@@ -11878,6 +11881,11 @@ int CSWSCreature::LoadFromTemplate(const CResRef& resRef, int flag)
         m_nDisguiseAppearance = pGff->ReadFieldWORD(&topStruct, const_cast<char*>("PM_Appearance"), bSuccess, 0);
     SetActivity(ACTIVITY_STEALTH, pGff->ReadFieldBYTE(&topStruct, const_cast<char*>("StealthMode"), bSuccess, 0), 0);
     LoadObjectState(pGff, &topStruct);
+#if KOTOR1
+    m_scriptVars.SetString(CExoString("K1_ENGAGE_SOURCE"),CExoString(resRef.GetResRefStr()));
+    if(auto* module=g_pAppManager->m_pServerExoApp->GetModule())
+        m_scriptVars.SetString(CExoString("K1_ENGAGE_SOURCE_MODULE"),module->GetModuleResourceName());
+#endif
 
     Vector vPosition;
     vPosition.x = pGff->ReadFieldFLOAT(&topStruct, const_cast<char*>("XPosition"), bSuccess, 0.0f);

@@ -1,4 +1,5 @@
 // Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
+// Updated for KotOR:CE v0.2 on 2026-11-24; see docs/LOCAL_CHANGES.md.
 #include "k2stdint.h"
 #include "port/k1engage.h"
 #include "port/sdlapi.h"
@@ -1241,7 +1242,7 @@ void CSWGuiMainMenu::HandleInputEvent(int type, int val)
     // The PC layout has no Continue control. The opt-in fixture uses the existing
     // save loading service with the explicit cloned fixture, so a test autosave cannot
     // silently change the next run's character, inventory or starting conditions.
-    if ((getenv("K1_ENGAGE_INTEGRATION") || getenv("K1_ENGAGE_ARENA")) && type==INPUTEVENT_GUI_A && val && m_bInputReady) {
+    if ((getenv("K1_ENGAGE_INTEGRATION") || getenv("K1_ENGAGE_ARENA") || (getenv("K1_ENGAGE_STORY") && getenv("K1_ENGAGE_NPC_POLICY_TEST"))) && type==INPUTEVENT_GUI_A && val && m_bInputReady) {
         fprintf(stderr,"K1_ENGAGE_FIXTURE load_explicit_isolated_save\n");
         LoadGameName(m_pGuiManager,CExoString("000003 - Game2"));
         m_stateFlags=(m_stateFlags & ~PANEL_REMOVE_STATE_MASK)|PANEL_REMOVE_AND_DELETE;

@@ -33,7 +33,7 @@ replace("'k1jastaff.mdl'", "'k1jadstaff.mdl'")
 replace("('k1jastaff' + extension)", "('k1jadstaff' + extension)")
 # Backpack-only panel closure is inapplicable to the closed Dark Jedi robe.
 replace("mesh_cap = close_staff_back_panel(next(n for n in nodes(model.root_node) if n.name == 'Torso'))", "mesh_cap = {'added_faces': 0, 'policy': 'Dark Jedi native mesh retained'}")
-replace("(14 if before.name == 'Torso' else 0)", "0")
+replace("(mesh_cap['added_faces'] if before.name == 'Torso' else 0)", "0")
 # Use the already reviewed body-specific weight distribution, including frozen
 # native neck boundaries. Preserve all other original skin/geometry.
 replace('staff_weight_report = apply_staff_torso_weights(model, staff_weight_bind)', """review=json.loads((engage/'yellow-weight-review/dark-02/skin-weights.json').read_text())

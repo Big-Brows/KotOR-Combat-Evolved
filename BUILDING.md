@@ -1,9 +1,3 @@
-For the clean KotOR:CE review copy, use platforms/tools/build-portable.cmd.
-It configures its own outputs and does not require another checkout's cache.
-Set KOTOR_CE_PYTHON when needed and KOTOR_CE_DEPENDENCY_CACHE to the extracted
-matching dependency-source directory for an offline build. Historical K12 build
-instructions below are retained for the other supported foundation targets.
-
 ## Building KotOR:CE
 
 KotOR:CE uses the K12 engine foundation and its existing build presets below.
@@ -261,7 +255,7 @@ Installing assets and running on-device:
 
 This re-signs the app with an "Apple Development" identity and a development profile from Xcode that covers the device, installs it with `xcrun devicectl`, copies the OBBs from `decomp_bins/` into the app's Documents folder (once) and launches it with the console attached. Without the script, put the two OBBs in the app's Documents folder yourself (Finder's device pane > Files, or the Files app).
 
-The deployment target is **iOS 15.0**, and the build is signed ad hoc by default (what the Simulator runs). To sign a device build at build time, configure with `-DK2I_CODESIGN_IDENTITY=YOUR_SIGNING_IDENTITY`, `-DK2I_PROVISIONING_PROFILE=<file.mobileprovision>` and, if the profile is not a wildcard, a matching `-DK2I_BUNDLE_ID=` (the default is `com.k2port.swkotorii.<ui>` / `com.k2port.swkotor.<ui>`). The entitlements come from the profile. `build_run_ios.sh` takes `--profile FILE` and `--bundle-id ID` for the same.
+The deployment target is **iOS 15.0**, and the build is signed ad hoc by default (what the Simulator runs). To sign a device build at build time, configure with `-DK2I_CODESIGN_IDENTITY="Apple Development: you@example.com (XXXXXXXXXX)"`, `-DK2I_PROVISIONING_PROFILE=<file.mobileprovision>` and, if the profile is not a wildcard, a matching `-DK2I_BUNDLE_ID=` (the default is `com.k2port.swkotorii.<ui>` / `com.k2port.swkotor.<ui>`). The entitlements come from the profile. `build_run_ios.sh` takes `--profile FILE` and `--bundle-id ID` for the same.
 
 </details>
 

@@ -23,3 +23,16 @@ Font assets/tuning and completed stance assets/tuning are not changed by this
 release preparation. Full campaign, actual GOG data and another PC remain untested.
 Code notices do not establish rights to game-derived assets. No publication has
 occurred; separate local review reports contain exact payload manifests and holds.
+
+
+## 2026-11-24 v0.2 test build
+
+Update custom combat, the faction/weapon/variant sandbox menu, native NPC roster,
+armor stance rigs and dismemberment integration. Include HP-based poise/parry
+policy, stance speed and moving-target contact fixes, and native grenade/mine
+combat handling. Reuse the portable owned-data patch launcher with Purple startup,
+version0.2.0, validated current asset manifests and v0.1 patch/license reuse.
+Remove inherited identifying diagnostic paths. Preserve published desktop-only
+SDL dependency selection, licenses, notices and upstream credits. New local
+customizations are distinct from original game behavior; see the included source
+and current design documentation for test scope and limits.

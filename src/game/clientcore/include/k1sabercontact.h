@@ -49,6 +49,18 @@ inline bool Overlap(const Triangle& x,const Triangle& y) {
     return true;
 }
 struct Blade {Vector base,tip;};
+// Express a previous blade sample in the target's current rigid body frame.
+// Sweeping this toward the current blade includes target translation/turning;
+// collision still uses the native posed triangles, without inflated hit boxes.
+inline Blade TargetRelative(const Blade& blade,Vector oldPosition,Quaternion oldRotation,Vector position,Quaternion rotation) {
+    oldRotation=normalize(oldRotation);rotation=normalize(rotation);
+    auto point=[&](Vector p){
+        p=p-oldPosition;
+        const Vector local(dot(p,oldRotation.xdir()),dot(p,oldRotation.ydir()),dot(p,oldRotation.zdir()));
+        return position+rotation.xdir()*local.x+rotation.ydir()*local.y+rotation.zdir()*local.z;
+    };
+    return {point(blade.base),point(blade.tip)};
+}
 inline Blade Between(const Blade& a,const Blade& b,float t) {
     Vector da=a.tip-a.base,db=b.tip-b.base;float la=magnitude(da),lb=magnitude(db);
     Vector base=a.base*(1-t)+b.base*t;

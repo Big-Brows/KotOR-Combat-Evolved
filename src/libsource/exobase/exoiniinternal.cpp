@@ -1,4 +1,5 @@
 // Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
+// Updated for KotOR:CE v0.2 on 2026-11-24; see docs/LOCAL_CHANGES.md.
 #include "k2stdint.h"
 #include "exoiniinternal.h"
 
@@ -8,7 +9,7 @@
 #include "sdlrwops.h"
 #endif
 
-#define EXOINI_FILE const_cast<char*>("source/exoini.cpp")
+#define EXOINI_FILE const_cast<char*>("libsource/exobase/exoini.cpp")
 
 #include "port/libcbase.h"
 #include "port/libcstring.h"

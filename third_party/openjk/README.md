@@ -26,3 +26,10 @@ ignored platforms/out/k1-engage-prototype/jka-direct-nav/.
 Local changes to these dependency files, if required by the host compiler, must
 be listed here and recorded in the ignored source/diff manifest. At import they
 are byte-for-byte copies of the pinned Git blobs.
+
+Red stance animation selection in src/game/clientcore/include/k1redchain.inc
+uses the SP bg_panimate.cpp transitionMove end/start quadrant mapping, with the
+strong-style animation family selected as in bg_pmove.cpp. The local exporter
+records the preserved reference file's SHA-256 in its ignored generation report.
+Only engine clip selectors and timing metadata are tracked; owned animation
+resources remain local. Upstream source attribution and COPYING apply as above.

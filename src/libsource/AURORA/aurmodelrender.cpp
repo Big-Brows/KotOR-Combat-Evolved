@@ -746,6 +746,14 @@ inline bool IsPartRenderable(PartTriMesh* pPart)
 struct PoiseBladeClip {
     int box[4]={};bool enabled=false,changed=false;
     ~PoiseBladeClip(){if(changed){ASLgl::glScissor(box[0],box[1],box[2],box[3]);if(!enabled)ASLgl::glDisable(0x0C11);}}
+    void SetRange(float leftEdge,float rightEdge) {
+        int viewport[4];ASLgl::glGetIntegerv(0x0BA2,viewport);
+        ASLgl::glGetIntegerv(0x0C10,box);enabled=ASLgl::glIsEnabled(0x0C11)!=0;
+        int left=std::max(viewport[0],int(std::floor(leftEdge))),right=std::min(viewport[0]+viewport[2],int(std::ceil(rightEdge)));
+        int bottom=viewport[1],top=viewport[1]+viewport[3];
+        if(enabled){left=std::max(left,box[0]);right=std::min(right,box[0]+box[2]);bottom=std::max(bottom,box[1]);top=std::min(top,box[1]+box[3]);}
+        ASLgl::glEnable(0x0C11);ASLgl::glScissor(left,bottom,std::max(0,right-left),std::max(0,top-bottom));changed=true;
+    }
     void Set(float base,float tip,int percent) {
         int viewport[4];ASLgl::glGetIntegerv(0x0BA2,viewport);
         ASLgl::glGetIntegerv(0x0C10,box);enabled=ASLgl::glIsEnabled(0x0C11)!=0;
@@ -779,7 +787,9 @@ void PartTriMesh::Draw(bool)
     PoiseBladeTranslation bladeTranslation(this);
     PoiseBladeClip bladeClip;
     float baseX=0,tipX=0;
-    if(K1EngagePoiseBladeRange(this,baseX,tipX)) {
+    if(K1EngagePoiseSolidRange(this,baseX,tipX)) {
+        if(K1EngagePoiseBladePercent(m_pGob)<100)bladeClip.SetRange(baseX,tipX);
+    } else if(K1EngagePoiseBladeRange(this,baseX,tipX)) {
         const int percent=K1EngagePoiseBladePercent(m_pGob);
         if(percent==0) return;
         if(percent<100) bladeClip.Set(baseX,tipX,percent);

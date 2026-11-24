@@ -10,7 +10,7 @@
 namespace {
 struct CutDefinition {
     std::string body,source,anchor,retained,detached,code;
-    Vector origin,axis;int slot=0;float probability=0;
+    Vector origin,axis;int slot=0;float probability=0;bool wholeHead=false;
 };
 std::vector<CutDefinition>& CutDefinitions() {
     static std::vector<CutDefinition> definitions;
@@ -19,20 +19,29 @@ std::vector<CutDefinition>& CutDefinitions() {
     if(!enabled || strcmp(enabled,"1"))return definitions;
     if(loaded)return definitions;
     if(!g_pExoResMan->Exists(CResRef("k1cuts"),RESTYPE_2DA,static_cast<unsigned int*>(nullptr)))return definitions;
-    loaded=true;C2DA table(CResRef("k1cuts"),1);
+    loaded=true;
+    for(const char* resource:{"k1cuts","k1npccuts"}) {
+    if(!g_pExoResMan->Exists(CResRef(resource),RESTYPE_2DA,static_cast<unsigned int*>(nullptr)))continue;
+    C2DA table(CResRef(resource),1);
     if(!table.Load2DArray())return definitions;
     for(int row=0;row<table.m_nRows;++row) {
         auto text=[&](const char* column){CExoString s;table.GetCExoStringEntry(row,CExoString(column),&s);return std::string(s.CStr()?s.CStr():"");};
         auto number=[&](const char* column){float f=0;table.GetFLOATEntry(row,CExoString(column),&f);return f;};
         CutDefinition d;d.body=text("body");d.source=text("source");d.anchor=text("anchor");d.code=text("cut");
+        // Explicit sandbox policy, including protection against a stale table.
+        if(!_stricmp(d.body.c_str(),"n_tusken") && (d.code=="rl" || d.code=="ll")) {
+            if(std::getenv("K1_ENGAGE_NPC_CUT_TEST"))fprintf(stderr,"K1_NPC_CUT_TUSKEN_LEG_REJECT cut=%s\n",d.code.c_str());
+            continue;
+        }
         d.retained=text("retained");d.detached=text("detached");d.slot=text("slot")=="head"?CSWCAnimBase::ANIM_MODEL_HEAD:CSWCAnimBase::ANIM_MODEL_BODY;
+        d.wholeHead=number("wholehead")!=0;
         d.origin=Vector(number("px"),number("py"),number("pz"));d.axis=Vector(number("ax"),number("ay"),number("az"));d.probability=number("probability");
         if(!K1SaberContact::Finite(d.origin)||!K1SaberContact::Finite(d.axis)||std::fabs(magnitude(d.axis)-1)>.001f){definitions.clear();break;}
         definitions.push_back(d);
     }
+    }
     fprintf(stderr,"K1_DISMEMBER_TABLE rows=%zu\n",definitions.size());return definitions;
 }
-struct CutTexture {std::string part,resource;};
 std::vector<CutTexture> CutTextures(Gob* model) {
     std::vector<CutTexture> result;if(!model)return result;
     auto collect=[&](auto&& self,Part* p)->void {
@@ -43,20 +52,50 @@ std::vector<CutTexture> CutTextures(Gob* model) {
         for(int i=0;i<p->m_nChildren;++i)self(self,p->m_paChildren[i]);
     };collect(collect,model->m_pPart);return result;
 }
+void RestoreCutCapTextures(Gob* model) {
+    if(!model)return;
+    for(const auto& texture:CutTextures(model))if(!_strnicmp(texture.part.c_str(),"dismember_",10)) {
+        const char* expected=!_strnicmp(texture.part.c_str(),"dismember_glow",14)?"jkcapgl":"jkcap";
+        if(_stricmp(texture.resource.c_str(),expected))if(auto* part=model->GetPart(const_cast<char*>(texture.part.c_str())))
+            if(part->m_pMaterial) {
+                if(std::getenv("K1_ENGAGE_NPC_CUT_TEST"))fprintf(stderr,"K1_DISMEMBER_CAP_RESTORED part=%s previous=%s expected=%s\n",part->Name(),texture.resource.c_str(),expected);
+                part->m_pMaterial->ReplaceTexture(nullptr,const_cast<char*>(expected));
+            }
+    }
+}
+std::string CutBasePartName(const std::string& name) {
+    const auto suffix=name.rfind("_p");
+    if(suffix==std::string::npos || suffix+2==name.size())return name;
+    for(size_t i=suffix+2;i<name.size();++i)if(name[i]<'0'||name[i]>'9')return name;
+    return name.substr(0,suffix);
+}
+const CutTexture* CutTextureFor(const std::vector<CutTexture>& textures,const std::string& part) {
+    for(const auto& texture:textures)if(texture.part==part)return &texture;
+    const auto base=CutBasePartName(part);
+    for(const auto& texture:textures)if(CutBasePartName(texture.part)==base)return &texture;
+    return nullptr;
+}
 void ApplyCutTextures(Gob* model,const std::vector<CutTexture>& textures) {
     if(!model)return;
-    for(const auto& texture:textures)if(auto* part=model->GetPart(const_cast<char*>(texture.part.c_str())))
+    // Retained and detached sides can require different native palette splits.
+    // Every exported _pN piece inherits its original mesh's runtime material.
+    auto apply=[&](auto&& self,Part* part)->void {
         if(part->m_pMaterial && _strnicmp(part->Name(),"dismember_",10))
-            part->m_pMaterial->ReplaceTexture(nullptr,const_cast<char*>(texture.resource.c_str()));
+            if(const auto* texture=CutTextureFor(textures,part->Name()))part->m_pMaterial->ReplaceTexture(nullptr,const_cast<char*>(texture->resource.c_str()));
+        for(int i=0;i<part->m_nChildren;++i)self(self,part->m_paChildren[i]);
+    };apply(apply,model->m_pPart);
 }
 bool CutTexturesMatch(Gob* model,const std::vector<CutTexture>& expected) {
     const auto actual=CutTextures(model);
     for(const auto& texture:actual) {
         if(!_strnicmp(texture.part.c_str(),"dismember_",10)) {
-            if(_stricmp(texture.resource.c_str(),texture.part=="dismember_glow"?"jkcapgl":"jkcap"))return false;
+            if(_stricmp(texture.resource.c_str(),CutBasePartName(texture.part)=="dismember_glow"?"jkcapgl":"jkcap"))return false;
         }else {
-            bool found=false;for(const auto& old:expected)if(old.part==texture.part){found=true;if(_stricmp(old.resource.c_str(),texture.resource.c_str()))return false;break;}
-            if(!found)return false;
+            const auto* old=CutTextureFor(expected,texture.part);
+            if(!old || _stricmp(old->resource.c_str(),texture.resource.c_str())) {
+                if(std::getenv("K1_ENGAGE_NPC_CUT_TEST"))fprintf(stderr,"K1_NPC_CUT_TEXTURE_DETAIL part=%s actual=%s expected=%s\n",texture.part.c_str(),texture.resource.c_str(),old?old->resource.c_str():"missing");
+                return false;
+            }
         }
     }
     return !actual.empty();
@@ -80,18 +119,19 @@ bool CutCapCenter(Gob* model,Vector& center){
     center=Vector(float(x/vertices.m_count),float(y/vertices.m_count),float(z/vertices.m_count));return K1SaberContact::Finite(center);
 }
 float CutVisualRandom(){static std::minstd_rand generator(0x51ab35);return std::generate_canonical<float,24>(generator);}
+constexpr float cutThrowMin=1.25f,cutThrowMax=1.75f;
 struct CutCorpse {
     CSWCCreature* owner;unsigned long long area;int row;Gob* limb=nullptr;
-    Gob* head=nullptr;Gob* weapon=nullptr;Vector landing;unsigned int flightMs=0;
+    Gob* head=nullptr;Gob* weapon=nullptr;Gob* leftWeapon=nullptr;Vector landing;unsigned int flightMs=0;
     long long sampledAt=0;bool landed=false;float floor=0;long long diedAt=0;bool nativeReloaded=false;
-    std::string headResource,weaponResource;float headScale=1,weaponScale=1;
-    std::vector<CutTexture> headTextures,weaponTextures;bool texturesMatch=true;
+    std::string headResource,weaponResource,leftWeaponResource;float headScale=1,weaponScale=1,leftWeaponScale=1;
+    std::vector<CutTexture> headTextures,weaponTextures,leftWeaponTextures;bool texturesMatch=true;
     int frozenSamples=0;float frozenError=0,finalTime=0;std::string deathClip;
     std::vector<FrozenCutPart> frozenPose;
-    Quaternion launchOrientation;Vector launchCap,throwOffset;float spinAngle=0,flatError=0,awayDot=0,throwDistance=0;unsigned int flightTotalMs=0;
+    Quaternion launchOrientation;Vector launchCap,throwOffset,swingMotion;float spinAngle=0,flatError=0,awayDot=0,throwDistance=0;unsigned int flightTotalMs=0;
 };
 unsigned long long cutPartsCreated=0,cutPartsDeleted=0;
-void DeleteCutParts(CutCorpse& c){cutPartsDeleted+=(c.weapon!=nullptr)+(c.head!=nullptr)+(c.limb!=nullptr);delete c.weapon;delete c.head;delete c.limb;c.weapon=c.head=c.limb=nullptr;}
+void DeleteCutParts(CutCorpse& c){cutPartsDeleted+=(c.weapon!=nullptr)+(c.leftWeapon!=nullptr)+(c.head!=nullptr)+(c.limb!=nullptr);delete c.weapon;delete c.leftWeapon;delete c.head;delete c.limb;c.weapon=c.leftWeapon=c.head=c.limb=nullptr;}
 float CutLowest(Gob* model) {
     float lowest=1e6f;if(!model)return lowest;
     auto collect=[&](auto&& self,Part* part)->void {
@@ -112,10 +152,15 @@ const CutDefinition* CutAt(int row) {auto& d=CutDefinitions();return row>=0 && r
 const char* NativeCutBody(CSWCCreature* actor) {
     auto* b=actor?actor->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1):nullptr;
     const char* name=b&&b->m_pModel?b->m_pModel->m_szName:"";
+    if(const char* wearable=WearableNativeResource(name))return wearable;
     if(!_stricmp(name,"k1jarig")||!_stricmp(name,"pmbbl"))return "pmbbl";
     if(!_stricmp(name,"k1jadark")||!_stricmp(name,"n_darkjedim"))return "n_darkjedim";
     if(!_stricmp(name,"k1jasith")||!_stricmp(name,"n_sithsoldier"))return "n_sithsoldier";
-    return "";
+    for(const auto& type:k1DarkJediTypes)if(!_stricmp(name,type.rig))return "n_darkjedim";
+    if(nativeNpcRigs.empty())LoadNativeNpcRigs();
+    for(const auto& rig:nativeNpcRigs)for(const auto* resource:{&rig.native,&rig.single,&rig.staff,&rig.dual,&rig.red,&rig.blue})
+        if(!_stricmp(name,resource->c_str()))return rig.native.c_str();
+    return name;
 }
 bool CutResources(const CutDefinition& d) {
     for(const auto* name:{d.retained.c_str(),d.detached.c_str()})
@@ -139,8 +184,90 @@ float CutCapsuleDistance(Vector hit,Vector a,Vector b){
     const float t=std::max(0.f,std::min(1.f,dot(hit-a,line)/ll));return magnitude(hit-(a+line*t));
 }
 bool CutCapsule(Vector hit,Vector a,Vector b,float radius){return CutCapsuleDistance(hit,a,b)<=radius;}
+// Native bodies do not share mesh names (some put the entire body in one skin).
+// Resolve the actual contacted skin's nearest vertex through its native palette
+// before using the existing bone-local anatomical regions.
+unsigned NpcCutSurfaceOwner(Part* surface,Vector hit) {
+    if(!surface)return 0;
+    auto classify=[](const char* name)->unsigned {
+        if(strlen(name)>=6 && !_strnicmp(name+2,"fngr",4)) {
+            if(name[0]=='r'||name[0]=='R')return 1;
+            if(name[0]=='l'||name[0]=='L')return 2;
+        }
+        for(const char* p:{"rbicep","rforearm","rhand","rfinger","rthumb"})if(!_strnicmp(name,p,strlen(p)))return 1;
+        for(const char* p:{"lbicep","lforearm","lhand","lfinger","lthumb"})if(!_strnicmp(name,p,strlen(p)))return 2;
+        for(const char* p:{"rthigh","rshin","rfoot","rtoe"})if(!_strnicmp(name,p,strlen(p)))return 4;
+        for(const char* p:{"lthigh","lshin","lfoot","ltoe"})if(!_strnicmp(name,p,strlen(p)))return 8;
+        for(const char* p:{"head","neck","eye","f_","jaw"})if(!_strnicmp(name,p,strlen(p)))return 16;
+        return 32;
+    };
+    auto* skin=surface->AsPartSkin();
+    if(!skin) {
+        for(auto* p=surface;p;p=p->m_pParent)if(classify(p->Name())==16)return 16;
+        return 32;
+    }
+    List<Vector> vertices;if(!skin->GetSkinnedWorldVertices(vertices)||!vertices.m_count)return 0;
+    int nearest=0;float best=1e20f;
+    for(int i=0;i<vertices.m_count;++i){float d=dot(vertices.m_pData[i]-hit,vertices.m_pData[i]-hit);if(d<best){best=d;nearest=i;}}
+    auto* node=static_cast<MdlNodeSkin*>(surface->m_pNode);
+    std::vector<Part*> parts;auto collect=[&](auto&& self,Part* p)->void{parts.push_back(p);for(int i=0;i<p->m_nChildren;++i)self(self,p->m_paChildren[i]);};
+    auto* root=surface;while(root->m_pParent)root=root->m_pParent;collect(collect,root);
+    const auto pool=node->m_pTree->AsModel()->m_nPool;
+    auto* data=static_cast<unsigned char*>(GLRender::LockPool(pool,0,0,0x10));if(!data)return 0;
+    auto* row=data+node->m_nGeomBase+nearest*node->m_nVertexStride;unsigned result=0;
+    for(int i=0;i<4;++i) {
+        const float weight=*reinterpret_cast<float*>(row+node->m_nBoneWeightsOfs+i*4);
+        const float slot=*reinterpret_cast<float*>(row+node->m_nBoneIndicesOfs+i*4);
+        if(weight<=.05f || !(slot>=0 && slot<20))continue;
+        const int bone=node->m_aBoneNodeIndices[int(slot)];
+        if(bone>=0 && bone<int(parts.size()))result|=classify(parts[bone]->Name());
+    }
+    GLRender::UnlockPool(pool);return result;
+}
+std::string NpcCutRegion(Gob* body,Gob* head,Part* surface,Vector hit) {
+    if(head && surface->m_pGob==head)return "he";
+    const unsigned owner=NpcCutSurfaceOwner(surface,hit);
+    if(owner&16) {
+        if(!_strnicmp(surface->Name(),"head",4)||!_strnicmp(surface->Name(),"eye",3))return "he";
+        Vector neck,face,low,high;
+        if((CutBone(body,"necklwr_g",neck)||CutBone(body,"headhook",neck))&&CutBone(body,"head_g",face)) {
+            Vector up=face-neck;
+            if(magnitude(up)<.01f && CutBone(body,"torso_g",low)&&CutBone(body,"torsoUpr_g",high))up=high-low;
+            // Shoulder vertices can carry a small neck influence. That does
+            // not make a chest/shoulder witness a head hit on a one-skin body.
+            if(magnitude(up)>.01f && dot(hit-neck,normalize(up))>=-.02f)return "he";
+        }
+    }
+    for(bool right:{true,false})if(owner&(right?1:2)) {
+        Vector shoulder,elbow,wrist;
+        if(!CutBone(body,right?"rbicep_g":"lbicep_g",shoulder)||!CutBone(body,right?"Rforearm_g":"Lforearm_g",elbow)||!CutBone(body,right?"Rhand_g":"Lhand_g",wrist))continue;
+        const float length=magnitude(wrist-elbow);if(length<.01f)continue;
+        const Vector distal=(wrist-elbow)/length;const float along=dot(hit-wrist,distal);
+        if(along>=-.10f && along<=std::min(.28f,length)+.07f && CutCapsule(hit,wrist-distal*.1f,wrist+distal*std::min(.28f,length),std::min(.20f,length*.75f)))return right?"rh":"lh";
+        const float radius=std::min(.33f,std::max(magnitude(elbow-shoulder),length));
+        if(along<-.10f && (CutCapsule(hit,shoulder,elbow,radius)||CutCapsule(hit,elbow,wrist-distal*.04f,radius)))return right?"ra":"la";
+    }
+    std::string leg;float closest=.25f;
+    bool legsAllowed=true;
+    if(body->m_pModel)for(const auto& rig:nativeNpcRigs)if(!_stricmp(rig.native.c_str(),"n_tusken"))
+        for(const auto* name:{&rig.native,&rig.single,&rig.staff,&rig.dual,&rig.red,&rig.blue})if(!_stricmp(body->m_pModel->m_szName,name->c_str()))legsAllowed=false;
+    for(bool right:{true,false})if(legsAllowed && (owner&(right?4:8))) {
+        Vector knee,ankle;if(!CutBone(body,right?"rshin_g":"lshin_g",knee)||!CutBone(body,right?"rfoot_g":"lfoot_g",ankle))continue;
+        const float distance=CutCapsuleDistance(hit,knee,ankle);if(distance<=closest){closest=distance;leg=right?"rl":"ll";}
+    }
+    if(!leg.empty())return leg;
+    if(owner&32) {
+        Vector low,high,pelvis;if(!CutBone(body,"torso_g",low)||!CutBone(body,"torsoUpr_g",high)||!CutBone(body,"pelvis_g",pelvis))return "";
+        const Vector up=normalize(high-low);const float height=dot(hit-pelvis,up);
+        if(height>=-.18f && height<=.18f && CutCapsule(hit,pelvis-up*.08f,pelvis+up*.08f,std::min(.40f,magnitude(high-low)*1.8f)))return "wa";
+    }
+    return "";
+}
 std::string CutRegion(Gob* body,Gob* head,Part* surface,Vector hit){
     if(!body||!surface||!K1SaberContact::Finite(hit))return "";
+    const char* resource=body->m_pModel?body->m_pModel->m_szName:"";
+    for(const auto& rig:nativeNpcRigs)if(_stricmp(rig.native.c_str(),"n_darkjedim") && _stricmp(rig.native.c_str(),"n_sithsoldier"))
+        for(const auto* name:{&rig.native,&rig.single,&rig.staff,&rig.dual,&rig.red,&rig.blue})if(!_stricmp(resource,name->c_str()))return NpcCutRegion(body,head,surface,hit);
     const char* mesh=surface->Name();
     const bool right=!_stricmp(mesh,"RArm"),left=!_stricmp(mesh,"LArm");
     if(right||left){
@@ -195,13 +322,22 @@ std::string CutRegion(Gob* body,Gob* head,Part* surface,Vector hit){
     }
     return "";
 }
+// Historical JKA boundary oracle for component comparisons; local fatal cuts
+// are now guaranteed after the existing saber/region eligibility gates.
 bool CutChance(float roll,float threshold){
     return std::isfinite(roll)&&roll>=1&&roll<=100&&std::isfinite(threshold)&&threshold>0&&std::floor(roll)<=threshold*2;
 }
+bool CutSaberContact(CSWSCreature* attacker,const MeleeContact& c) {
+    const int slot=c.dualWeapon!=OBJECT_INVALID&&c.offhand?CSWInventory::SLOT_LEFTWEAPON:CSWInventory::SLOT_RIGHTWEAPON;
+    auto* item=attacker&&attacker->m_pInventory?attacker->m_pInventory->GetItemInSlot(slot):nullptr;
+    auto* client=attacker?attacker->GetClientCreature():nullptr;
+    if(!item||!item->IsLightsaber()||!client||(c.dualWeapon!=OBJECT_INVALID&&item->m_objectId!=c.dualWeapon))return false;
+    if(c.dualWeapon!=OBJECT_INVALID){K1SaberContact::Blade beam;return DualBlade(client,c.offhand?1:0,beam);}
+    Vector a,b;return Blade(client,a,b);
+}
 int SampleDismemberment(CSWSCreature* attacker,CSWSCreature* target,const MeleeContact& c) {
     if(CutDefinitions().empty()||!c.hitPart||!attacker||!target)return -1;
-    auto* item=attacker->m_pInventory?attacker->m_pInventory->GetItemInSlot(CSWInventory::SLOT_RIGHTWEAPON):nullptr;
-    Vector a,b;if(!item||!item->IsLightsaber()||!attacker->GetClientCreature()||!Blade(attacker->GetClientCreature(),a,b))return -1;
+    if(!CutSaberContact(attacker,c))return -1;
     auto* client=target->GetClientCreature();auto* body=client?client->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1):nullptr;
     if(!body||cutCorpses.count(client->m_objectId))return -1;
     const auto code=CutRegion(body,client->GetModel(CSWCAnimBase::ANIM_MODEL_HEAD,1),c.hitPart,c.hitPoint);
@@ -215,19 +351,21 @@ int SampleDismemberment(CSWSCreature* attacker,CSWSCreature* target,const MeleeC
     for(int row=0;row<int(defs.size());++row){const auto& d=defs[row];
         if(d.code!=code||_stricmp(d.body.c_str(),NativeCutBody(client))||!CutResources(d))continue;
         auto* slot=client->GetModel(d.slot,1);if(!slot||!slot->m_pModel||(d.slot==CSWCAnimBase::ANIM_MODEL_HEAD&&_stricmp(slot->m_pModel->m_szName,d.source.c_str())))continue;
-        fprintf(stderr,"K1_DISMEMBER_REGION attacker=%llu target=%llu serial=%d mesh=%s cut=%s direction=%d probability_roll=deferred\n",c.attacker,c.target,c.serial,c.hitPart->Name(),code.c_str(),direction);return row;
+        fprintf(stderr,"K1_DISMEMBER_REGION attacker=%llu target=%llu serial=%d mesh=%s cut=%s direction=%d fatal_policy=guaranteed\n",c.attacker,c.target,c.serial,c.hitPart->Name(),code.c_str(),direction);return row;
     }
     return -1;
 }
 struct CutRoll {CSWCCreature* owner;unsigned long long area,effect;};
 std::map<unsigned long long,CutRoll> cutRolls;
-void RegisterCutCorpse(CSWSCreature* target,int row,unsigned long long effect){
+void RegisterCutCorpse(CSWSCreature* target,int row,unsigned long long effect,Vector motion=Vector()){
     const auto* d=CutAt(row);auto* client=target?target->GetClientCreature():nullptr;
     if(!d||!client||cutCorpses.count(client->m_objectId)||_stricmp(NativeCutBody(client),d->body.c_str())||!CutResources(*d)||!target->GetArea())return;
     auto& corpse=cutCorpses.emplace(client->m_objectId,CutCorpse{client,static_cast<CSWSArea*>(target->GetArea())->m_objectId,row}).first->second;
     corpse.diedAt=g_pAppManager->m_pServerExoApp->GetWorldTimer()->GetSnapshotTime();
+    corpse.swingMotion=motion;
     if(auto* head=client->GetModel(CSWCAnimBase::ANIM_MODEL_HEAD,1))if(head->m_pModel){corpse.headResource=head->m_pModel->m_szName;corpse.headScale=head->m_fObjectScale;corpse.headTextures=CutTextures(head);}
     if(auto* weapon=client->GetModel(CSWCAnimBase::ANIM_MODEL_RIGHT_ITEM_BODY,1))if(weapon->m_pModel){corpse.weaponResource=weapon->m_pModel->m_szName;corpse.weaponScale=weapon->m_fObjectScale;corpse.weaponTextures=CutTextures(weapon);}
+    if(auto* weapon=client->GetModel(CSWCAnimBase::ANIM_MODEL_LEFT_ITEM_BODY,1))if(weapon->m_pModel){corpse.leftWeaponResource=weapon->m_pModel->m_szName;corpse.leftWeaponScale=weapon->m_fObjectScale;corpse.leftWeaponTextures=CutTextures(weapon);}
     fprintf(stderr,"K1_DISMEMBER_FATAL actor=%llu effect=%llu cut=%s\n",target->m_objectId,effect,d->code.c_str());
 }
 void ClearDismemberArea(unsigned long long area) {
@@ -261,14 +399,16 @@ void UpdateDismemberCorpses(CAurScene* rendered) {
             const bool rebuilt=client->SetAppearance(&appearance,0x0f,1,0)!=0;ReattachCutActor(client);
             fprintf(stderr,"K1_DISMEMBER_NATIVE_RELOAD_%s actor=%llu\n",rebuilt?"PASS":"FAIL",client->m_objectId);++it;continue;
         }
+        if(model && model->m_pModel && !_stricmp(model->m_pModel->m_szName,d->retained.c_str()))RestoreCutCapTextures(model);
         auto* nativeBody=client->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1);bool nativeDeath=false;const char* deathClip=nullptr;
-        if(nativeBody)for(const char* clip:{"die","die1","die3","dead","dead1","dead3"}) {float time,length;if(nativeBody->GetAnimation(const_cast<char*>(clip),&time,&length)){nativeDeath=true;deathClip=clip;break;}}
+        if(nativeBody)for(const char* clip:{"die","die1","die3","dead","dead1","dead3","cdie","cdead"}) {float time,length;if(nativeBody->GetAnimation(const_cast<char*>(clip),&time,&length)){nativeDeath=true;deathClip=clip;break;}}
         if(rendered && nativeDeath && model && model->m_pScene==rendered && model->m_pModel && !_stricmp(model->m_pModel->m_szName,d->retained.c_str()) && !c.limb) {
             c.limb=static_cast<Gob*>(NewCAurObject(const_cast<char*>(d->detached.c_str()),nullptr,nullptr,nullptr));
             if(c.limb) {
                 ++cutPartsCreated;
                 const auto textures=CutTextures(model);ApplyCutTextures(c.limb,textures);
                 c.texturesMatch=CutTexturesMatch(c.limb,textures);
+                c.limb->TurnOffShadows();
                 c.deathClip=deathClip;
                 if(!FreezeFinalCutPose(c.limb,deathClip,c.finalTime)){
                     fprintf(stderr,"K1_DISMEMBER_FINAL_FAIL actor=%llu reason=clip\n",client->m_objectId);DeleteCutParts(c);++it;continue;
@@ -289,13 +429,15 @@ void UpdateDismemberCorpses(CAurScene* rendered) {
                 if(!capFrame){DeleteCutParts(c);++it;continue;}
                 float lowest=CutLowest(c.limb);
                 auto* native=client->GetServerCreature();auto* area=native?static_cast<CSWSArea*>(native->GetArea()):nullptr;
-                Vector outward=sourceCap-(native?native->m_position:position);outward.z=0;
-                if(magnitude(outward)<.03f){const float heading=CutVisualRandom()*6.2831853f;outward=Vector(std::cos(heading),std::sin(heading),0);}
-                outward=normalize(outward);const float yaw=std::atan2(outward.y,outward.x)+(CutVisualRandom()*2-1)*1.15f;
+                Vector outward=c.swingMotion;outward.z=0;
+                // Legacy diagnostic effects have no blade-motion payload.
+                if(!K1SaberContact::Finite(outward)||magnitude(outward)<.0001f)outward=sourceCap-(native?native->m_position:position);
+                outward.z=0;if(magnitude(outward)<.0001f)outward=Vector(1,0,0);
+                outward=normalize(outward);const float yaw=std::atan2(outward.y,outward.x);
                 const Vector side(std::cos(yaw),std::sin(yaw),0);c.awayDot=dot(side,outward);
-                c.throwDistance=.25f+CutVisualRandom()*.20f;c.throwOffset=side*c.throwDistance;c.launchCap=sourceCap;c.landing=position+c.throwOffset;
+                c.throwDistance=cutThrowMin+CutVisualRandom()*(cutThrowMax-cutThrowMin);c.throwOffset=side*c.throwDistance;c.launchCap=sourceCap;c.landing=position+c.throwOffset;
                 c.spinAngle=(CutVisualRandom()*2-1)*.26179939f;
-                fprintf(stderr,"K1_DISMEMBER_THROW actor=%llu yaw=%g distance=%g away_dot=%g spin=%g\n",client->m_objectId,yaw,c.throwDistance,c.awayDot,c.spinAngle);
+                fprintf(stderr,"K1_DISMEMBER_THROW actor=%llu yaw=%g distance=%g motion_dot=%g spin=%g shadows=%d\n",client->m_objectId,yaw,c.throwDistance,c.awayDot,c.spinAngle,c.limb->m_nShadows);
                 float floor=area?g_pAppManager->m_pServerExoApp->ComputeHeight(area->m_resRef,sourceCap+c.throwOffset+Vector(0,0,3),1):position.z;
                 if(!std::isfinite(floor)||std::fabs(floor-position.z)>4)floor=native?native->m_position.z:position.z;
                 c.floor=floor;
@@ -304,20 +446,25 @@ void UpdateDismemberCorpses(CAurScene* rendered) {
                 c.flightMs=std::max(350u,static_cast<unsigned int>(std::sqrt(2*drop/9.81f)*1000));
                 c.sampledAt=g_pAppManager->m_pServerExoApp->GetWorldTimer()->GetSnapshotTime();
                 auto attach=[&](int slot,const char* anchor,Gob*& output){
-                    const bool head=slot==CSWCAnimBase::ANIM_MODEL_HEAD;
-                    const auto& resource=head?c.headResource:c.weaponResource;if(resource.empty())return;
+                    const bool head=slot==CSWCAnimBase::ANIM_MODEL_HEAD;const bool left=slot==CSWCAnimBase::ANIM_MODEL_LEFT_ITEM_BODY;
+                    const auto& resource=head?c.headResource:left?c.leftWeaponResource:c.weaponResource;if(resource.empty())return;
                     HideCutAttachment(client->GetModel(slot,1));
                     output=static_cast<Gob*>(NewCAurObject(const_cast<char*>(resource.c_str()),nullptr,nullptr,nullptr));
-                    if(output){++cutPartsCreated;if(head){float finalTime;FreezeFinalCutPose(output,c.deathClip.c_str(),finalTime);}const auto& textures=head?c.headTextures:c.weaponTextures;ApplyCutTextures(output,textures);c.texturesMatch=c.texturesMatch&&CutTexturesMatch(output,textures);output->m_fObjectScale=head?c.headScale:c.weaponScale;output->AttachToObject(c.limb,const_cast<char*>(anchor),0);output->AttachToScene(model->m_pScene);}
+                    if(output){++cutPartsCreated;output->TurnOffShadows();if(head){float finalTime;FreezeFinalCutPose(output,c.deathClip.c_str(),finalTime);}const auto& textures=head?c.headTextures:left?c.leftWeaponTextures:c.weaponTextures;ApplyCutTextures(output,textures);c.texturesMatch=c.texturesMatch&&CutTexturesMatch(output,textures);output->m_fObjectScale=head?c.headScale:left?c.leftWeaponScale:c.weaponScale;output->AttachToObject(c.limb,const_cast<char*>(anchor),0);output->AttachToScene(model->m_pScene);}
                 };
-                if(d->code=="wa")attach(CSWCAnimBase::ANIM_MODEL_HEAD,"headhook",c.head);
+                if(d->code=="wa" || d->wholeHead)attach(CSWCAnimBase::ANIM_MODEL_HEAD,"headhook",c.head);
                 if(d->code=="wa"||d->code=="ra"||d->code=="rh") {
                     attach(CSWCAnimBase::ANIM_MODEL_RIGHT_ITEM_BODY,"rhand",c.weapon);
                     if(c.weapon){auto off=[&](auto&& self,Part* p)->void {if(p->m_pNode->AsMdlNodeLightsaber())p->m_bDrawEnabled=false;for(int i=0;i<p->m_nChildren;++i)self(self,p->m_paChildren[i]);};off(off,c.weapon->m_pPart);}
                 }
+                if(d->code=="wa"||d->code=="la"||d->code=="lh") {
+                    attach(CSWCAnimBase::ANIM_MODEL_LEFT_ITEM_BODY,"lhand",c.leftWeapon);
+                    if(c.leftWeapon){auto off=[&](auto&& self,Part* p)->void {if(p->m_pNode->AsMdlNodeLightsaber())p->m_bDrawEnabled=false;for(int i=0;i<p->m_nChildren;++i)self(self,p->m_paChildren[i]);};off(off,c.leftWeapon->m_pPart);}
+                }
                 const float bodyLowest=lowest;
                 if(c.head)lowest=std::min(lowest,CutLowest(c.head));
                 if(c.weapon)lowest=std::min(lowest,CutLowest(c.weapon));
+                if(c.leftWeapon)lowest=std::min(lowest,CutLowest(c.leftWeapon));
                 c.landing.z+=bodyLowest-lowest;
                 c.flightMs=std::max(350u,static_cast<unsigned int>(std::sqrt(2*std::max(0.f,position.z-c.landing.z)/9.81f)*1000));
                 c.flightTotalMs=c.flightMs;
@@ -355,7 +502,8 @@ void UpdateDismemberCorpses(CAurScene* rendered) {
             if(!c.flightMs){c.landed=true;fprintf(stderr,"K1_DISMEMBER_LANDED actor=%llu z=%g\n",it->first,c.landing.z);}
         }
         {
-            if(d->code=="wa")HideCutAttachment(client->GetModel(CSWCAnimBase::ANIM_MODEL_HEAD,1));
+            if(d->code=="wa" || d->wholeHead)HideCutAttachment(client->GetModel(CSWCAnimBase::ANIM_MODEL_HEAD,1));
+            if(d->code=="wa"||d->code=="la"||d->code=="lh")HideCutAttachment(client->GetModel(CSWCAnimBase::ANIM_MODEL_LEFT_ITEM_BODY,1));
             if(d->code=="wa"||d->code=="ra"||d->code=="rh")HideCutAttachment(client->GetModel(CSWCAnimBase::ANIM_MODEL_RIGHT_ITEM_BODY,1));
         }
         ++it;
@@ -367,23 +515,33 @@ void K1EngageTagMeleeDamage(unsigned long long attacker,unsigned long long targe
     if(!damageContact||damageContact->attacker!=attacker||damageContact->target!=target||CutDefinitions().empty())return;
     if(damageContact->dismemberRow<0){
         auto* actor=g_pAppManager->m_pServerExoApp->GetCreatureByGameObjectID(attacker);
-        auto* item=actor&&actor->m_pInventory?actor->m_pInventory->GetItemInSlot(CSWInventory::SLOT_RIGHTWEAPON):nullptr;
-        Vector a,b;if(!item||!item->IsLightsaber()||!actor->GetClientCreature()||!Blade(actor->GetClientCreature(),a,b))return;
+        if(!CutSaberContact(actor,*damageContact))return;
     }
     int old[22];for(int i=0;i<22;++i)old[i]=effect->GetInteger(i);
-    effect->SetNumIntegers(25);for(int i=0;i<22;++i)effect->SetInteger(i,old[i]);
+    effect->SetNumIntegers(28);for(int i=0;i<22;++i)effect->SetInteger(i,old[i]);
     effect->SetInteger(22,cutEffectMarker);effect->SetInteger(23,damageContact->dismemberRow);effect->SetInteger(24,damageContact->serial);
+    Vector motion=damageContact->bladeMotion;motion.z=0;
+    if(!K1SaberContact::Finite(motion)||magnitude(motion)<.0001f){
+        auto* actor=g_pAppManager->m_pServerExoApp->GetCreatureByGameObjectID(attacker);
+        Vector forward=actor?actor->m_orientation:Vector(1,0,0);forward.z=0;
+        int direction=K1EngageOwnsPlayer(attacker)?swingDirection:(npcPlayback.count(attacker)?npcPlayback[attacker].direction:0);
+        motion=direction==3?Vector(forward.y,-forward.x,0):direction==4?Vector(-forward.y,forward.x,0):forward;
+    }
+    if(!K1SaberContact::Finite(motion)||magnitude(motion)<.0001f)motion=Vector(1,0,0);
+    motion=normalize(motion);
+    effect->SetInteger(25,int(std::round(motion.x*1000000.f)));
+    effect->SetInteger(26,int(std::round(motion.y*1000000.f)));
+    effect->SetInteger(27,int(std::round(motion.z*1000000.f)));
 }
 void K1EngageFatalMeleeDamage(CSWSCreature* target,CGameEffect* effect) {
-    if(!K1EngageEnabled()||!target||!effect||effect->m_numIntegers!=25||effect->GetInteger(22)!=cutEffectMarker)return;
+    if(!K1EngageEnabled()||!target||!effect||effect->m_numIntegers<25||effect->GetInteger(22)!=cutEffectMarker)return;
     const int row=effect->GetInteger(23);const auto* d=CutAt(row);auto* client=target->GetClientCreature();
     if(!d||!client||!target->GetArea()||cutRolls.count(target->m_objectId))return;
     cutRolls[target->m_objectId]={client,static_cast<CSWSArea*>(target->GetArea())->m_objectId,effect->m_effectId};
-    const float roll=1+99.f*float(rand_wincompatible()&32767)/32767.f;
-    const bool diagnostic=std::getenv("K1_ENGAGE_DISMEMBER_TEST")!=nullptr;
-    const bool accepted=diagnostic||CutChance(roll,d->probability);
-    fprintf(stderr,"K1_DISMEMBER_ROLL_%s target=%llu effect=%llu cut=%s roll=%g threshold=%g diagnostic=%d\n",accepted?"ACCEPT":"REJECT",target->m_objectId,effect->m_effectId,d->code.c_str(),roll,d->probability*2,diagnostic);
-    if(accepted)RegisterCutCorpse(target,row,effect->m_effectId);
+    Vector motion;
+    if(effect->m_numIntegers>=28)motion=Vector(effect->GetInteger(25)/1000000.f,effect->GetInteger(26)/1000000.f,effect->GetInteger(27)/1000000.f);
+    fprintf(stderr,"K1_DISMEMBER_ROLL_ACCEPT target=%llu effect=%llu cut=%s threshold=100 policy=guaranteed motion=%g,%g,%g\n",target->m_objectId,effect->m_effectId,d->code.c_str(),motion.x,motion.y,motion.z);
+    RegisterCutCorpse(target,row,effect->m_effectId,motion);
 }
 const char* K1EngageDismemberModel(CSWCCreature* actor,const CResRef& original,int slot) {
     auto it=cutCorpses.find(actor->m_objectId);if(it==cutCorpses.end()||it->second.owner!=actor)return nullptr;
@@ -396,7 +554,7 @@ namespace {
 void DismemberModelProbe(CSWGuiScene& scene) {
     if(!std::getenv("K1_ENGAGE_DISMEMBER_MODEL_TEST"))return;
     static bool done=false;if(done)return;done=true;
-    bool ok=CutDefinitions().size()==24;int models=0,samples=0,terminalSamples=0;float largest=0;
+    bool ok=CutDefinitions().size()>=24;int models=0,samples=0,terminalSamples=0;float largest=0;
     bool directionPolicy=true;int policyCases=0;
     for(const char* code:{"ra","la","rh","lh","wa","he"})for(int direction=0;direction<7;++direction){
         const unsigned int allowed=(code[1]=='a'&&code[0]!='w')?0x67u:0x18u;
@@ -467,14 +625,15 @@ void DismemberModelProbe(CSWGuiScene& scene) {
     ok=ok&&regions;fprintf(stderr,"K1_DISMEMBER_REGIONS_%s cases=%d chance_boundaries=7\n",regions?"PASS":"FAIL",regionCases);
     CGameEffect effect(1),clone(1);effect.SetNumIntegers(22);
     for(int i=0;i<22;++i)effect.SetInteger(i,i*17+3);
-    MeleeContact witness={111,222,1};witness.dismemberRow=0;damageContact=&witness;
+    MeleeContact witness={111,222,1};witness.dismemberRow=0;witness.bladeMotion=Vector(0,-.1f,0);damageContact=&witness;
     K1EngageTagMeleeDamage(111,223,&effect);ok=ok&&effect.m_numIntegers==22;
     K1EngageTagMeleeDamage(111,222,&effect);damageContact=nullptr;clone.CopyEffect(&effect,0);
-    ok=ok&&clone.m_numIntegers==25&&clone.GetInteger(22)==cutEffectMarker&&clone.GetInteger(23)==0;
+    ok=ok&&clone.m_numIntegers==28&&clone.GetInteger(22)==cutEffectMarker&&clone.GetInteger(23)==0&&clone.GetInteger(25)==0&&clone.GetInteger(26)==-1000000&&clone.GetInteger(27)==0;
     for(int i=0;i<22;++i)ok=ok&&clone.GetInteger(i)==i*17+3;
     Vector hit;ok=ok&&K1SaberContact::IntersectionPoint(Vector(0,0,-1),Vector(0,0,1),{{-1,-1,0},{1,-1,0},{0,1,0}},hit)&&magnitude(hit)<1e-6;
     fprintf(stderr,"K1_DISMEMBER_PAYLOAD_%s native_fields=22 copied=1 mismatched_target=1\n",ok?"PASS":"FAIL");
     for(const auto& d:CutDefinitions())for(const auto& resource:{d.retained,d.detached}) {
+        if(_strnicmp(d.retained.c_str(),"k1d",3))continue; // Original 24-pair regression remains stable.
         int index=scene.m_aModels.m_count;auto* body=static_cast<Gob*>(scene.AddModel(CExoString(resource.c_str()),-1));
         if(!body){ok=false;continue;}++models;
         if(!_stricmp(d.body.c_str(),"n_darkjedim")) {
@@ -534,6 +693,7 @@ void DismemberModelProbe(CSWGuiScene& scene) {
     fprintf(stderr,"K1_DISMEMBER_TERMINAL_SUMMARY samples=%d\n",terminalSamples);
     fprintf(stderr,"K1_DISMEMBER_MODELS_%s models=%d native_death_samples=%d maximum_cap_gap=%g\n",ok?"PASS":"FAIL",models,samples,largest);
 }
+#include "k1npcdismemberprobe.h"
 bool DismemberLiveContactProbe(int& phase,int& ticks,CSWSCreature* player,CSWSCreature* enemy) {
     static int trial=0;static bool started=false;
     static int finishSerial=-1;static long long finishDeadline=0,finishDeath=0;
@@ -566,8 +726,8 @@ bool DismemberLiveContactProbe(int& phase,int& ticks,CSWSCreature* player,CSWSCr
             if(distance<.3f||dot(eye,movement)<.4f*distance*distance){fprintf(stderr,"K1_VICTORY_CAMERA_MOVE_TRACE player=%g eye=%g alignment=%g\n",distance,magnitude(eye),dot(eye,movement));fail("camera_did_not_follow_native_movement");return true;}
             fprintf(stderr,"K1_VICTORY_CAMERA_MOVE_PASS trial=%d player_distance=%g camera_distance=%g\n",trial,distance,magnitude(eye));
             cameraTurnStart=camera->GetPosition()-player->m_position;cameraTurnStart.z=0;cameraTurnStart.Normalize();
-            // This arena profile binds native camera-left to A (Action284A=51).
-            if(FILE* f=fopen("dark-jedi-input.txt","w")){fputs("keydown:4\n+20:keyup:4\n",f);fclose(f);}
+            // The documented profile uses Z/C camera rotation; A/D move.
+            if(FILE* f=fopen("dark-jedi-input.txt","w")){fputs("keydown:29\n+20:keyup:29\n",f);fclose(f);}
             phase=604;ticks=0;
         }else if(phase==604&&ticks>=35){
             Vector orbit=camera->GetPosition()-player->m_position;orbit.z=0;orbit.Normalize();
@@ -663,8 +823,8 @@ bool DismemberArenaProbe(int& phase,int& ticks,CSWSCreature* player,CSWSCreature
     if(phase==490 && ticks>30) {
         enemy->m_bPlot=0;enemy->m_hitPoints=1000;enemy->SetCurrentHitPoints(1000);beforeNonlethal=1000;
         // Exercise the production witness/rule adapter on real posed skin.
-        // Blade motion is synthetic; the intersection and source probabilities
-        // are unchanged. All-location death trials below remain explicit picks.
+        // Blade motion is synthetic; source region geometry is unchanged.
+        // All-location death trials below remain explicit picks.
         auto* body=enemy->GetClientCreature()->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1);
         std::vector<K1SaberContact::Triangle> triangles;std::vector<Part*> parts;
         CollisionTriangles(body,triangles,&parts);MeleeContact contact={player->m_objectId,enemy->m_objectId,attackSerial};
@@ -708,6 +868,7 @@ bool DismemberArenaProbe(int& phase,int& ticks,CSWSCreature* player,CSWSCreature
         if(!enemy){fail("missing_enemy");return true;}
         enemy->m_bPlot=0;enemy->SetCurrentHitPoints(1);
         MeleeContact contact={player->m_objectId,enemy->m_objectId,attackSerial};contact.dismemberRow=selected;
+        contact.bladeMotion=trial%2?Vector(0,.1f,0):Vector(0,-.1f,0);
         damageContact=&contact;bool sent=ContactDamage(player,enemy,false);damageContact=nullptr;
         if(!sent){fail("native_damage_queue");return true;}
         fprintf(stderr,"K1_DISMEMBER_TEST_SELECTION synthetic_region=1 actual_native_damage=1 row=%d\n",selected);
@@ -751,7 +912,10 @@ bool DismemberArenaProbe(int& phase,int& ticks,CSWSCreature* player,CSWSCreature
         if(found==cutCorpses.end()){fail("lost_cut_corpse");return true;}
         auto& c=found->second;
         if(c.frozenSamples<2||c.frozenError>.00001f){fail("final_pose_not_frozen");return true;}
-        if(c.awayDot<=0||c.throwDistance<.25f||c.throwDistance>.45f||std::fabs(c.spinAngle)>.2618f){fail("throw_bounds");return true;}
+        const Vector expectedMotion=trial%2?Vector(0,1,0):Vector(0,-1,0);
+        if(magnitude(c.swingMotion-expectedMotion)>.00001f||dot(c.throwOffset,expectedMotion)<cutThrowMin-.001f){fail("swing_motion_transport");return true;}
+        if(c.awayDot<.999f||c.throwDistance<cutThrowMin||c.throwDistance>cutThrowMax||std::fabs(c.spinAngle)>.2618f){fail("throw_bounds");return true;}
+        for(auto* detached:{c.limb,c.head,c.weapon,c.leftWeapon})if(detached&&detached->m_nShadows){fail("detached_shadow");return true;}
         if(c.flatError>.00001f){fail("throw_tilts_final_pose");return true;}
         fprintf(stderr,"K1_DISMEMBER_FLAT_PASS trial=%d maximum_tilt_error=%g\n",trial,c.flatError);
         Vector finalCap;if(!CutCapCenter(c.limb,finalCap)){fail("throw_cap");return true;}

@@ -7,6 +7,7 @@ public:
     int percent=100;
     int layoutWidth=0,layoutHeight=0;
     float modelLength=1.f;
+    float sourceModelLength=1.f;
     float bladeLength=0.f;
     float singleModelLength=0.f,singleBladeLength=0.f;
     float bladeDepth=0.f,singleBladeDepth=0.f;

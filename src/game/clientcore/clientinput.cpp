@@ -1457,6 +1457,9 @@ int CClientExoAppInternal::HandleInputEvent(int nAction, int nParam)
     // In-game menu toggle.
     case INPUTEVENT_PAD_MENU: case INPUTEVENT_GUI:
         if (nParam != 0) {
+#if KOTOR1 && defined(K2_UI_PC)
+            if(K1EngageCloseSandboxMenu())return handled;
+#endif
 #if !KOTOR1
             m_pSWGuiManager->HandleInputEvent(nAction, nParam);
             if (g_gameMenuCancelledActivateInGameGuiButton != 0) {

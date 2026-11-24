@@ -1,4 +1,5 @@
 // Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
+// Updated for KotOR:CE v0.2 on 2026-11-24; see docs/LOCAL_CHANGES.md.
 // gamedirs.cpp -- where the desktop builds find the game: its files (chitin.key, data/, modules/ ...)
 // and the player's (saves/, swkotor.ini), which an installed copy keeps apart.
 //
@@ -333,7 +334,7 @@ std::vector<std::string> SteamLibraries(const std::string& root)
 }
 
 // Returns the host's Steam roots as the Windows build sees them under Wine through Z: (the host's
-// /), the macOS client's for each source/<name>.
+// /), the macOS client's for each Z:/Users/<name> and the Linux clients' for each Z:/home/<name>.
 std::vector<Steam> WineHostSteamRoots()
 {
     std::vector<Steam> roots;

@@ -4397,7 +4397,7 @@ int CSWSCreature::UpdateSubareasOnMoveTo(const Vector& from, const Vector& to, i
     int bInSubAreas = pArea->InSubAreas(to, &listNew);
 
     if (bUsePassedList) {
-        if (nPrevCount <= 0 && bInSubAreas == 0)
+        if (nPrevCount <= 0 && bInSubAreas == 0 && (!pCrossed || pCrossed->m_count == 0))
             return 0;
         if (HandleSubAreaStateChanges(&listNew, pCrossed, nFlag, 1) != 1)
             return 0;
@@ -4409,7 +4409,7 @@ int CSWSCreature::UpdateSubareasOnMoveTo(const Vector& from, const Vector& to, i
 
     CExoArrayList<unsigned long long> listCrossed;
     pArea->IntersectingLineSegment(from, to, &listCrossed);
-    if (nPrevCount <= 0 && bInSubAreas == 0)
+    if (nPrevCount <= 0 && bInSubAreas == 0 && listCrossed.m_count == 0)
         return 0;
     if (HandleSubAreaStateChanges(&listNew, &listCrossed, nFlag, 1) != 1)
         return 0;
@@ -7927,6 +7927,9 @@ int CSWSCreature::AIActionItemCastSpell(CSWSObjectActionNode* pAction)
     unsigned long long oidItem   = pAction->m_args.m_useItemPropItemId;
     int                nProperty = pAction->m_args.m_aqItemPropertyIndex;
     unsigned long long oidTarget = pAction->m_args.m_itemCastTargetId;
+#if KOTOR1 && defined(K2_UI_PC)
+    if(K1EngageSandboxBlocksPlayerTarget(m_objectId,oidTarget))return ACTION_COMPLETE;
+#endif
     float fTargetX = pAction->m_args.m_aqItemPointX;
     float fTargetY = pAction->m_args.m_aqItemPointY;
     float fTargetZ = pAction->m_args.m_aqItemPointZ;
@@ -7987,6 +7990,9 @@ int CSWSCreature::AIActionItemCastSpell(CSWSObjectActionNode* pAction)
         SetAnimation(GetPauseReadyAnimation());
         m_bItemCastStarted = 0;
         RemoveSpellActionFromRound();
+#if KOTOR1 && defined(K2_UI_PC)
+        K1EngageUtilityCompleted(this);
+#endif
         ProcessPendingCombatActions();
         return CSWSObject::ACTION_COMPLETE;
     }
@@ -8227,8 +8233,10 @@ int CSWSCreature::AIActionItemCastSpell(CSWSObjectActionNode* pAction)
 
             m_pCombatRound->m_nCastsThisRound += 1;
 
-#if KOTOR1  // K1: one impact call at the target.
-            SpellCastAndImpact(nSpellId, vTarget, oidTarget, CSWSObject::CAST_CLASS_NONE, oidItem, 0, 0, 0, 0);
+#if KOTOR1  // Combat grenades detonate at their landing point, even if the victim moves.
+            const bool impactGrenade=K1EngageEnabled() &&
+                static_cast<CSWItem*>(pItem)->GetBaseItem()->m_nItemType==ITEM_TYPE_GRENADE;
+            SpellCastAndImpact(nSpellId, vTarget, impactGrenade?OBJECT_INVALID:oidTarget, CSWSObject::CAST_CLASS_NONE, oidItem, 0, 0, 0, 0);
 #else
             if (static_cast<CSWItem*>(pItem)->GetBaseItem()->m_nItemType == ITEM_TYPE_GRENADE
                 && nSpellId <= SPELL_GRENADE_LAUNCHED_FRAGMENTATION - 1)
@@ -8261,6 +8269,9 @@ int CSWSCreature::AIActionItemCastSpell(CSWSObjectActionNode* pAction)
         SetAnimation(GetPauseReadyAnimation());
         m_bItemCastStarted = 0;
         RemoveSpellActionFromRound();
+#if KOTOR1 && defined(K2_UI_PC)
+        K1EngageUtilityCompleted(this);
+#endif
         ProcessPendingCombatActions();
         return CSWSObject::ACTION_COMPLETE;
     }
@@ -8336,6 +8347,9 @@ int CSWSCreature::AIActionCastSpell(CSWSObjectActionNode* pAction)
     nMetaMagic = pAction->m_args.m_castMetaMagic;
     bSkipCharge = pAction->m_args.m_bCastSkipReadyCount;
     oidTarget = pAction->m_args.m_castTargetId;
+#if KOTOR1 && defined(K2_UI_PC)
+    if(K1EngageSandboxBlocksPlayerTarget(m_objectId,oidTarget))return ACTION_COMPLETE;
+#endif
     vTarget = Vector(pAction->m_args.m_castPointX, pAction->m_args.m_castPointY,
                      pAction->m_args.m_castPointZ);
     nFlags = pAction->m_args.m_castFlags;
@@ -8445,6 +8459,9 @@ castBlocked:
     nConjureTime = pSpell->m_nConjureTimeMS;
     nCastTime = pSpell->m_nCastPauseMS;
     nRecovery = pSpell->m_nCastRecoveryMS;
+#if KOTOR1 && defined(K2_UI_PC)
+    if(K1EngageFastUtility(this) && nRecovery>100)nRecovery=100;
+#endif
 
     if (m_pCombatRound->m_bRoundStarted != 0) {
         if (m_pCombatRound->m_bRoundPaused == 0 && m_pCombatRound->m_nCastsThisRound <= 0) {
@@ -8577,12 +8594,18 @@ castBlocked:
             if (nFeatId != -1)
                 m_pStats->DecrementFeatRemainingUses(static_cast<unsigned short>(nFeatId));
             RemoveSpellActionFromRound();
+#if KOTOR1 && defined(K2_UI_PC)
+            K1EngageUtilityCompleted(this);
+#endif
             ProcessPendingCombatActions();
             return CSWSObject::ACTION_COMPLETE;
         }
         if (pSpell->m_nCatchAnimation == 0)
             SetAnimation(SERVER_ANIMATION_CATCH_SABER);
         m_bSpellChargeSpent = 0;
+#if KOTOR1 && defined(K2_UI_PC)
+        K1EngageUtilityCompleted(this);
+#endif
         ProcessPendingCombatActions();
         RemoveSpellActionFromRound();
         return CSWSObject::ACTION_FAILED;

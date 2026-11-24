@@ -1,4 +1,5 @@
 // Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
+// Updated for KotOR:CE v0.2 on 2026-11-24; see docs/LOCAL_CHANGES.md.
 #include "k2stdint.h"
 #include <algorithm>
 
@@ -919,7 +920,7 @@ expand:
 #else
                     unsigned int nSquareId = static_cast<unsigned int>(AurAddDrawableSquare(
                         &vSquare[0].x, DEBUG_COLOR_WHITE,
-                        "source/nwsareapathfind.cpp",
+                        "game/servercore/nwsareapathfind.cpp",
                         7718));
 #endif
                     nRenderDEFLines[nRenderDFSCount] = nSquareId;

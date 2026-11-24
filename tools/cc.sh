@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
 # Compile one KOTOR2 TU with the pinned NDK toolchain into build/<TU>.o
 # Usage: tools/cc.sh src/<path>/<TU>.cpp   (run from repo root)
 #
@@ -12,7 +11,7 @@ if [[ -z "${NDK_DIR:-}" ]]; then
   if [[ -d toolchain/android-ndk-r21d ]]; then
     NDK_DIR="$(cd toolchain/android-ndk-r21d && pwd)"
   else
-    NDK_DIR="${HOME}/Library/Android/sdk/ndk/21.4.7075529"   # r21e fallback
+    NDK_DIR="/Users/maxamillion/Library/Android/sdk/ndk/21.4.7075529"   # r21e fallback
   fi
 fi
 CXX="$NDK_DIR/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android23-clang++"
