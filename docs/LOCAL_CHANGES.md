@@ -36,3 +36,12 @@ Remove inherited identifying diagnostic paths. Preserve published desktop-only
 SDL dependency selection, licenses, notices and upstream credits. New local
 customizations are distinct from original game behavior; see the included source
 and current design documentation for test scope and limits.
+
+
+Compact release update (2026-11-24): portable MDL/MDX data remains compressed and
+reconstructs exact bytes through K12 streams on demand. Reuse native resource
+ownership and cache; serialize bounded reconstruction into delete-on-close files.
+Animation fitting, assets and combat tuning remain unchanged. Verification covers
+2778 target model hashes, 23 rigs/69 samples/5229 matching posed transforms, repeat
+loading, relocation, saves and failure paths. Measured installed footprint about
+2.8 GiB. See PORTABLE.md and DESIGN.md for behavior and test limits.

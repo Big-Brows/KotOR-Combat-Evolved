@@ -1,5 +1,6 @@
 # Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
 # Updated for KotOR:CE v0.2 on 2026-11-24; see docs/LOCAL_CHANGES.md.
+# Updated for compact model loading on 2026-11-24; see docs/LOCAL_CHANGES.md.
 """Focused portable integration checks. Writes only beneath ignored project output."""
 from pathlib import Path
 import argparse, configparser, ctypes as c, hashlib, importlib.util, json, os, shutil, subprocess, time
@@ -29,7 +30,13 @@ def main():
  run(['--prepare-only'])
  manifest=json.loads((work/'asset-manifest.json').read_text())
  assert len(manifest)>184 and any(f['file']=='override/k1npcs.2da' for f in manifest)
- assert all(sha((work/'user-data'/f['file']).read_bytes())==f['sha256'] for f in manifest)
+ compact=(work/'data/lazy-models-v1').exists()
+ for f in manifest:
+  data=(work/'user-data'/f['file']).read_bytes()
+  if compact and f['file'].endswith(('.mdl','.mdx')):
+   fields=data.decode('ascii').splitlines()
+   assert len(data)==200 and fields[0]=='KLM1' and fields[3]==f['sha256']
+  else:assert sha(data)==f['sha256']
  checks.append(dict(check='all_reconstructed_assets',count=len(manifest),passed=True))
  save=work/'user-data/saves/000003 - Game2/savenfo.res';data=save.read_bytes();save.write_bytes(data+b'PORTABLE_SAVE_SENTINEL')
  run(['--prepare-only']);assert save.read_bytes()==data+b'PORTABLE_SAVE_SENTINEL';save.write_bytes(data)
@@ -56,6 +63,8 @@ def main():
   text=(work/'user-data/game.log').read_text(errors='replace')
   assert 'K2_WINDOW_PRODUCT title=KotOR:CE' in text
   assert 'K1_PORTABLE_PURPLE_PASS rig=k1japurp rate=1.3' in text
+  if compact:
+   assert 'K1_PORTABLE_MODELS_PASS models=23 clips=69 player=k1japurp' in text and 'K1_LAZY_MODEL_PASS' in text
   assert 'K1_SANDBOX_READY initial_npcs=0 loadout=1' in text and 'K1_FIXTURE_EQUIP_PASS' in text
   assert not __import__('re').search(r'K1_\w+_FAIL',text)
   config=configparser.ConfigParser();config.read(work/'user-data/swkotor.ini')

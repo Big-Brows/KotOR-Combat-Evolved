@@ -1,5 +1,6 @@
 // Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
 // Updated for KotOR:CE v0.2 on 2026-11-24; see docs/LOCAL_CHANGES.md.
+// Updated for compact model loading on 2026-11-24; see docs/LOCAL_CHANGES.md.
 #include "port/k1engage.h"
 #include <set>
 #if KOTOR1 && defined(K2_UI_PC)
@@ -8518,6 +8519,54 @@ void SandboxTick() {
         static bool checked=false;
         if(!checked){checked=true;const bool ok=PurpleMode() && !StaffMode() && !DualMode() && !strcmp(PlayerRigResource(),"k1japurp");
             fprintf(stderr,"K1_PORTABLE_PURPLE_%s rig=%s rate=%g\n",ok?"PASS":"FAIL",PlayerRigResource(),PlayerMeleeRate());}
+    }
+    if(std::getenv("K1_PORTABLE_MODEL_TEST")) {
+        static bool tested=false;
+        if(!tested) {
+            tested=true;
+            bool ok=K1EngageEnter();int models=0,clips=0;
+            std::vector<std::string> resources={"k1jarig","k1jared","k1jablue","k1japurp","k1jadual","k1jastaff",
+                "k1jadark","k1jadred","k1jadblue","k1jaddual","k1jadstaff"};
+            for(const char* prefix:{"pm","pf"}) {
+                bool found=false;
+                for(const auto& rig:wearableRigs)if(!rig.native.compare(0,2,prefix)) {
+                    for(const auto* style:{&rig.single,&rig.red,&rig.blue,&rig.purple,&rig.dual,&rig.staff})resources.push_back(*style);
+                    found=true;break;
+                }
+                ok=ok&&found;
+            }
+            FILE* poses=fopen("portable-model-poses.tsv","w");ok=ok&&poses;
+            for(const auto& resourceName:resources) {
+                const char* resource=resourceName.c_str();
+                CSWCAnimBase owner;
+                bool loaded=owner.LoadModel(CResRef(resource),CSWCAnimBase::ANIM_MODEL_BODY)!=0;
+                auto* body=loaded?owner.GetModel(CSWCAnimBase::ANIM_MODEL_BODY):nullptr;
+                loaded=body && body->m_pModel && !_stricmp(body->m_pModel->m_szName,resource);
+                if(loaded) {
+                    ++models;body->AttachToScene(nullptr);body->m_bAlwaysRendering=true;body->EnableForceAnimations();
+                    for(const char* clip:{"j_idle","s_top","s_lr"}) {
+                        bool played=body->PlayAnimation(const_cast<char*>(clip),0,AnimRun::kAnimNoBlendIn,.3f)!=0;
+                        if(played){
+                            body->Animate(.000001f);++clips;
+                            if(poses) {
+                                auto record=[&](auto&& self,Part* part)->void {
+                                    Vector v;Quaternion q;part->GetWorld(v,q);
+                                    fprintf(poses,"%s\t%s\t%s\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\n",resource,clip,
+                                        part->m_pNode->TranslateNodeName(),v.x,v.y,v.z,q.w,q.x,q.y,q.z);
+                                    for(int i=0;i<part->m_nChildren;++i)self(self,part->m_paChildren[i]);
+                                };record(record,body->m_pPart);
+                            }
+                        }ok=ok&&played;
+                    }
+                }
+                ok=ok&&loaded;
+            }
+            if(poses)fclose(poses);
+            auto* actor=Actor();auto* body=actor?actor->GetModel(CSWCAnimBase::ANIM_MODEL_BODY,1):nullptr;
+            ok=ok && body && body->m_pModel && !_stricmp(body->m_pModel->m_szName,PlayerRigResource());
+            fprintf(stderr,"K1_PORTABLE_MODELS_%s models=%d clips=%d player=%s\n",ok?"PASS":"FAIL",models,clips,
+                body&&body->m_pModel?body->m_pModel->m_szName:"none");
+        }
     }
     auto* server=g_pAppManager->m_pServerExoApp;auto* player=ServerActor();auto* area=static_cast<CSWSArea*>(player->GetArea());
     if(sandboxArea==OBJECT_INVALID)sandboxArea=area->m_objectId;

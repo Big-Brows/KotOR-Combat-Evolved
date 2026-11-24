@@ -1,4 +1,5 @@
 # Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
+# Updated for compact model loading on 2026-11-24; see docs/LOCAL_CHANGES.md.
 cmake_minimum_required(VERSION 3.21)
 cmake_policy(SET CMP0141 NEW)
 set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "")
@@ -23,3 +24,8 @@ target_compile_definitions(discovery-tests PRIVATE _CRT_SECURE_NO_WARNINGS strca
 target_compile_options(discovery-tests PRIVATE "/FI${CMAKE_CURRENT_SOURCE_DIR}/compat.h")
 set_property(TARGET discovery-tests PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
 target_link_libraries(discovery-tests PRIVATE advapi32)
+
+add_executable(lazy-model-check EXCLUDE_FROM_ALL ../windows/lazy_model_check.cpp ../windows/lazy_model.cpp)
+target_compile_features(lazy-model-check PRIVATE cxx_std_17)
+target_compile_definitions(lazy-model-check PRIVATE _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(lazy-model-check PRIVATE bcrypt msdelta psapi)

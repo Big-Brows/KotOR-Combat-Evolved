@@ -5,6 +5,9 @@ upstream credits, licenses and technical identifiers are retained. The upstream
 description and platform claims below describe K12, not additional verification
 of this local project.
 
+A local compact portable candidate now supports lossless on-demand model storage;
+see [portable instructions](docs/PORTABLE.md) for measured size and verification.
+
 ## Local wearable stance support
 
 The isolated K1 sandbox supports native male/female wearable armor, robes and

@@ -1,5 +1,6 @@
 // Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
 // Updated for KotOR:CE v0.2 on 2026-11-24; see docs/LOCAL_CHANGES.md.
+// Updated for compact model loading on 2026-11-24; see docs/LOCAL_CHANGES.md.
 // KotOR:CE portable arena launcher, built on K12. No private settings are embedded.
 #include <windows.h>
 #include <shellapi.h>
@@ -110,6 +111,7 @@ static int Run() {
     Env(L"K1_ENGAGE_NPC_TYPE", L"dark-jedi"); Env(L"K1_WINDOW", L"1280x720");
     Env(L"K2_INPUT", smoke ? L"100:key:40;1200:quit:0" : L"100:key:40");
     if (smoke) { Env(L"K2_HIDDEN", L"1"); Env(L"K1_PORTABLE_SMOKE",L"1"); }
+    if (smoke && fs::exists(package / L"data/lazy-models-v1")) Env(L"K1_PORTABLE_MODEL_TEST",L"1");
     const auto exe = package / L"bin/k1.exe";
     std::wstring command = L"\"" + exe.wstring() + L"\"";
     STARTUPINFOW startup{}; startup.cb = sizeof(startup);

@@ -1,5 +1,6 @@
 REM Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
 REM Updated for KotOR:CE v0.2 on 2026-11-24; see docs/LOCAL_CHANGES.md.
+REM Updated for compact model loading on 2026-11-24; see docs/LOCAL_CHANGES.md.
 @echo off
 setlocal
 pushd "%~dp0..\.."
@@ -15,6 +16,7 @@ if errorlevel 1 goto :failed
 cmake --build platforms/out/launcher-build
 if errorlevel 1 goto :failed
 if /i "%~1"=="--test-discovery" goto :test_discovery
+if /i "%~1"=="--build-lazy-check" goto :build_lazy_check
 rem Use cached sources only. No downloads, installs or shared dependency builds.
 set "K12_DEPS=%CD%/platforms/out/k1-host-pc/_deps"
 for /f "tokens=1,* delims==" %%a in ('findstr /b "Python3_EXECUTABLE:" platforms\out\k1-host-pc\CMakeCache.txt') do set "K12_PYTHON=%%b"
@@ -29,6 +31,11 @@ exit /b 0
 cmake --build platforms/out/launcher-build --target discovery-tests
 if errorlevel 1 goto :failed
 platforms\out\launcher-build\discovery-tests.exe "platforms/out/launcher-audit/discovery-%RANDOM%"
+if errorlevel 1 goto :failed
+popd
+exit /b 0
+:build_lazy_check
+cmake --build platforms/out/launcher-build --target lazy-model-check
 if errorlevel 1 goto :failed
 popd
 exit /b 0

@@ -1,4 +1,5 @@
 // Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
+// Updated for compact model loading on 2026-11-24; see docs/LOCAL_CHANGES.md.
 // Versioned owned-data patches. Source installations are only ever opened for read.
 #include <windows.h>
 #include <bcrypt.h>
@@ -73,6 +74,7 @@ void PrepareArena(const fs::path& package, const fs::path& profile,
         bases.push_back(std::move(bytes));
     }
     Require(!bases.empty());
+    const bool lazyModels = fs::exists(package / L"data/lazy-models-v1");
     std::ifstream manifest(package / L"data/patches.tsv");
     Require(bool(manifest));
     const auto seed = profile / L"saves/000003 - Game2";
@@ -89,12 +91,38 @@ void PrepareArena(const fs::path& package, const fs::path& profile,
             destination = pendingSeed / Relative(name).filename();
         }
         CheckLocalPath(destination);
+        auto extension = destination.extension().string();
+        bool lazy = lazyModels && name.compare(0, 9, "override/") == 0 &&
+                    (extension == ".mdl" || extension == ".mdx");
         // First-run fixture saves are never written over a player's saves.
-        if (fs::exists(destination) && FileHash(destination) == hash) continue;
+        if (!lazy && fs::exists(destination) && FileHash(destination) == hash) continue;
         auto sourceIndex = std::stoull(index);
         Require(sourceIndex < bases.size());
         auto patch = Read(package / L"data" / Relative(patchName));
         auto& base = bases[sourceIndex];
+        if (lazy) {
+            // These are content-addressed inputs, not reconstructed resources. The
+            // runtime validates them again and streams exact model bytes on demand.
+            Require(base.size() <= 64 * 1024 * 1024 && patch.size() <= 64 * 1024 * 1024);
+            auto baseHash = Hash(base.data(), base.size());
+            auto patchHash = Hash(patch.data(), patch.size());
+            auto store = destination.parent_path() / L".k1models";
+            CheckLocalPath(store); fs::create_directories(store);
+            auto put = [&](const fs::path& target, const Bytes& data, const std::string& expected) {
+                CheckLocalPath(target);
+                if (fs::exists(target) && FileHash(target) == expected) return;
+                auto pending = target; pending += L".pending"; CheckLocalPath(pending);
+                std::ofstream file(pending, std::ios::binary | std::ios::trunc);
+                file.write((const char*)data.data(), data.size()); file.close(); Require(bool(file));
+                Require(MoveFileExW(pending.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE);
+            };
+            put(store / (baseHash + ".base"), base, baseHash);
+            put(store / (patchHash + ".delta"), patch, patchHash);
+            std::string descriptor = "KLM1\n" + baseHash + "\n" + patchHash + "\n" + hash + "\n";
+            Bytes data(descriptor.begin(), descriptor.end());
+            put(destination, data, Hash(data.data(), data.size()));
+            continue;
+        }
         DELTA_INPUT source{};
         source.lpStart = base.data(); source.uSize = base.size();
         Require(patch.size() >= 8 && memcmp(patch.data(), "KDP1", 4) == 0);

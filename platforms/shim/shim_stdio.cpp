@@ -1,3 +1,4 @@
+// Updated for compact model loading on 2026-11-24; see docs/LOCAL_CHANGES.md.
 // Aspyr's libc overrides. libkotor2.so defines its own fopen/stat/rename/remove/access/mkdir/
 // rmdir/unlink/chdir (the Android build reads the game through its OBB VFS), so the engine hands them
 // DOS paths straight from the alias resolver (".\\CHITIN.key"). Each one here translates the path --
@@ -26,6 +27,9 @@
 
 #include <algorithm>
 #include <vector>
+#if defined(_WIN32) && defined(K2P_LAZY_MODELS)
+#include "../windows/lazy_model.h"
+#endif
 
 namespace {
 
@@ -201,7 +205,19 @@ SDL_RWops* SDL_RWFromFile(const char* pszFile, const char* pszMode)
 {
     static auto real = Real<SDL_RWops* (*)(const char*, const char*)>("SDL_RWFromFile");
     if (pszFile && pszMode)
-        if (FILE* fp = fopen(pszFile, pszMode)) return SDL_RWFromFP(fp, SDL_TRUE);
+        if (FILE* fp = fopen(pszFile, pszMode)) {
+#if defined(_WIN32) && defined(K2P_LAZY_MODELS)
+            size_t n = strlen(pszFile);
+            if (!IsWrite(pszMode) && n >= 4 &&
+                (!strcasecmp(pszFile+n-4, ".mdl") || !strcasecmp(pszFile+n-4, ".mdx"))) {
+                fp = k1_lazy_model_open(fp, HostPath(pszFile));
+                if (!fp) return nullptr; // Never hand an invalid descriptor to the model parser.
+            }
+#endif
+            SDL_RWops* rw = SDL_RWFromFP(fp, SDL_TRUE);
+            if (!rw) fclose(fp);
+            return rw;
+        }
     return real(pszFile, pszMode);
 }
 #endif

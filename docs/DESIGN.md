@@ -1,5 +1,35 @@
 # KotOR:CE local K1 Engage prototype
 
+## Lossless portable model streams
+
+Portable packages can opt into KLM1 descriptors for loose MDL/MDX resources using
+data/lazy-models-v1. A descriptor contains only three lowercase SHA-256 values:
+native base, KDP1 delta and reconstructed target. Its sibling .k1models directory
+contains deduplicated base/delta inputs. No machine-specific paths are embedded.
+The existing resource directory enumeration and CExoFile -> SDL stream path remain
+in use. Raw models and packages without the marker retain their existing behavior.
+
+The Windows stream adapter validates fixed descriptor syntax, rejects reparse
+paths, checks input hashes, and inspects each delta target size before applying it.
+It writes exact reconstructed chunks to a delete-on-close temporary file, checking
+the complete target hash before exposing the seekable stream. Errors release all
+handles/buffers and never expose the descriptor as model data. Empty MDX is valid.
+
+A mutex serializes reconstruction within the process. Source/patch inputs are
+limited to 64 MiB each, targets to 32 chunks of at most 16 MiB. MSDelta requires
+additional internal scratch memory. There is no additional expanded-model RAM
+cache: native CRes demand/release and resident caching remain authoritative, and
+active streams are never evicted. OS file caching remains reclaimable. This changes
+storage and loading only; animation data, fitting, weights, bind transforms,
+attachment hooks, dismemberment meshes and gameplay tuning are byte-preserved.
+
+The backend is compiled separately from K12's Win32 compatibility/no-exception
+dialect. Native model/pose probes are opt-in smoke checks, not gameplay paths.
+Repeated loading of the largest 75,216,621-byte model (22 opens, two simultaneous
+stream lifetimes) peaked at 28,499,968 bytes working set in the standalone probe;
+that is not a bound on total game memory. Focused raw/compact native animation
+probe times were 28.99/31.35 seconds on this machine, not a general benchmark.
+
 ## Red motion, guard and JKA directional chains
 
 Red uses separate player/NPC resources. Its first attack retains the S3/A3/R3

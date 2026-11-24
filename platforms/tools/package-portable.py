@@ -1,5 +1,6 @@
 # Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
 # Updated for KotOR:CE v0.2 on 2026-11-24; see docs/LOCAL_CHANGES.md.
+# Updated for compact model loading on 2026-11-24; see docs/LOCAL_CHANGES.md.
 """Create an ignored, explicit-file portable candidate; never publishes or ships raw game files.
 Run with the Python interpreter already configured in the developer CMake cache.
 The owned-data patch API is documented at learn.microsoft.com/windows/win32/devnotes/msdelta.
@@ -136,12 +137,16 @@ def package_release(args):
         if number%50==0:print('PATCH',number+1,len(targets),'reused',reused,flush=True)
     (output/'data/sources.tsv').write_text('\n'.join('\t'.join(map(str,b[0])) for b in bases)+'\n',encoding='utf-8')
     (output/'data/patches.tsv').write_text('\n'.join(rows)+'\n',encoding='utf-8')
+    if args.compact_models:
+        (output/'data/lazy-models-v1').write_text('KLM1\n',encoding='ascii')
     for name in old.namelist():
         relative=name[len(prefix):]
         if relative.startswith('licenses/') or relative=='NOTICE.txt':
             dest=output/relative;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(old.read(name))
     readme=old.read(prefix+'README.txt').decode('utf-8').replace('0.1','0.2')
     readme=readme.replace('double-bladed','Purple single-saber').replace('double bladed','Purple single-saber')
+    if args.compact_models:
+        readme+='\nCompact model storage: model deltas stay compressed and load through temporary\nstreams on demand. Earlier expanded-setup size figures do not apply. Keep all\npackage files and user-data/override/.k1models together.\n'
     (output/'README.txt').write_text(readme,encoding='utf-8')
     shutil.copy2(REPO/'platforms/out/launcher-build/KotOR-CE.exe',output/'KotOR-CE.exe')
     shutil.copy2(REPO/'platforms/out/k1-private-pc/windows/k1.exe',output/'bin/k1.exe')
@@ -162,6 +167,7 @@ def main():
     parser.add_argument('--jka-dir',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--reuse-release',type=Path)
+    parser.add_argument('--compact-models',action='store_true',help='Keep exact MDL/MDX deltas; reconstruct requested models through K12 streams')
     args=parser.parse_args()
     if args.reuse_release:return package_release(args)
     output=args.output.resolve()
@@ -219,6 +225,8 @@ def main():
     (output/'data/sources.tsv').write_text('\n'.join('\t'.join(map(str,b[0])) for b in bases)+'\n',encoding='utf-8')
     (output/'data/patches.tsv').write_text('\n'.join(rows)+'\n',encoding='utf-8')
     shutil.copy2(REPO/'platforms/out/launcher-build/KotOR-CE.exe',output/'KotOR-CE.exe')
+    if args.compact_models:
+        (output/'data/lazy-models-v1').write_text('KLM1\n',encoding='ascii')
     shutil.copy2(REPO/'platforms/out/k1-private-pc/windows/k1.exe',output/'bin/k1.exe')
     (output/'asset-manifest.json').write_text(json.dumps(report,indent=2)+'\n')
     # Only installed MSVC redistributables; never arbitrary DLLs from PATH.

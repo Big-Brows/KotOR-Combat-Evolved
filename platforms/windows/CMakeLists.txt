@@ -1,4 +1,5 @@
 # Modified for KotOR:CE on 2026-11-16; see docs/LOCAL_CHANGES.md.
+# Updated for compact model loading on 2026-11-24; see docs/LOCAL_CHANGES.md.
 # Windows platform layer and the k2 / k1 executable: presets <k1|k2>-cross-windows-<ui> (llvm-mingw),
 # *-cross-windows-msvc-pc / *-cross-windows-cl-pc, and the host presets on a Windows machine (cl.exe).
 #
@@ -92,6 +93,14 @@ target_compile_options(k2_platform PRIVATE ${K2P_CL_FLAGS})
 target_link_libraries(k2_platform PUBLIC SDL2::SDL2 k2movie k2_audio Freetype::Freetype ZLIB::ZLIB
                                          opengl32 glu32 Threads::Threads)
 set_target_properties(k2_platform PROPERTIES CXX_STANDARD 11)
+if(K2P_GAME STREQUAL "k1")
+  add_library(k1_lazy_models STATIC lazy_model.cpp)
+  target_compile_features(k1_lazy_models PRIVATE cxx_std_17)
+  target_compile_definitions(k1_lazy_models PRIVATE _CRT_SECURE_NO_WARNINGS)
+  target_link_libraries(k1_lazy_models PRIVATE bcrypt msdelta)
+  target_compile_definitions(k2_platform PRIVATE K2P_LAZY_MODELS=1)
+  target_link_libraries(k2_platform PUBLIC k1_lazy_models)
+endif()
 # The movie player draws into the shim's stand-in for the window's framebuffer and presents through
 # its copy-and-swap.
 target_compile_definitions(k2movie PRIVATE K2M_GL_GETPROC=k2shim_gl_proc_c K2M_GL_SWAP=k2shim_gl_swap_c)

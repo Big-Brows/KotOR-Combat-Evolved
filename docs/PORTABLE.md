@@ -1,5 +1,29 @@
 # KotOR:CE portable Windows arena candidate
 
+## Compact model storage (local candidate)
+
+`package-portable.py --compact-models` opts a new package into lossless on-demand
+MDL/MDX loading. Alternatively, `prepare-compact-portable.py --package EXISTING
+--output NEW` reuses an existing verified package and current built executables.
+Use a fresh ignored output directory. Existing v0.2 artifacts remain unchanged.
+
+The launcher stores small model descriptors and content-addressed source/delta
+inputs under user-data. K12 reconstructs requested models into temporary files
+that are deleted when their resource stream closes. Keep the entire portable
+folder together, including user-data/override/.k1models. Original game installs
+remain read-only. Corrupt model inputs fail validation when requested; setup
+continues validating owned source hashes and non-model resources as before.
+
+Measured candidate: about 2.8 GiB including generated data, versus 16.2 GiB for
+the existing v0.2 setup. Download compression is substantially unchanged. Temporary
+disk space is also needed for actively opening models. This does not reduce K12's
+existing parsed-model or rendering memory requirements.
+
+Verification: 2,778 reconstructed model hashes match the current release. Native
+pose comparison covers 23 rigs (all player styles, existing NPC styles and male/
+female armor examples), 69 animation samples and 5,229 identical part transforms.
+This is focused storage/loader validation, not a full campaign compatibility test.
+
 The project/product name is **KotOR:CE**. Windows filenames use **KotOR-CE**
 because a colon is not allowed in a filename. K12 credits and internal engine/
 configuration identifiers remain intact; the existing checkout folder stays in
