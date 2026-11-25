@@ -14,6 +14,8 @@
 #include <memory>
 #include <stdexcept>
 #include <cstring>
+#include <cstdlib>
+#include <list>
 
 namespace {
 namespace fs = std::filesystem;
@@ -60,11 +62,35 @@ Bytes Read(const fs::path& path, const std::string& hash) {
     Hasher h; h.Add(b.data(), b.size()); Check(h.End() == hash); return b;
 }
 using File = std::unique_ptr<FILE, decltype(&fclose)>;
+struct CachedModel {
+    fs::path path;
+    std::string descriptor;
+    size_t bytes;
+    File file;
+};
+std::list<CachedModel> models;
+size_t cachedBytes = 0;
+constexpr size_t CacheLimit = 256 * 1024 * 1024;
+
+File Reader(FILE* source) {
+    HANDLE handle = ReOpenFile(reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(source))),
+        GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0);
+    if (handle == INVALID_HANDLE_VALUE) return File(nullptr, &fclose);
+    int fd = _open_osfhandle(reinterpret_cast<intptr_t>(handle), _O_BINARY | _O_RDONLY);
+    if (fd < 0) {
+        CloseHandle(handle);
+        return File(nullptr, &fclose);
+    }
+    FILE* stream = _fdopen(fd, "rb");
+    if (!stream) _close(fd);
+    return File(stream, &fclose);
+}
 File Temporary() {
     wchar_t folder[MAX_PATH], name[MAX_PATH];
     DWORD n = GetTempPathW(MAX_PATH, folder); Check(n && n < MAX_PATH);
     Check(GetTempFileNameW(folder, L"k1m", 0, name) != 0);
-    HANDLE h = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+    HANDLE h = CreateFileW(name, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                            FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
     if (h == INVALID_HANDLE_VALUE) { DeleteFileW(name); Check(false); }
     int fd = _open_osfhandle((intptr_t)h, _O_BINARY | _O_RDWR);
@@ -81,6 +107,15 @@ File Restore(FILE* descriptor, const fs::path& path) {
     std::string baseHash = s.substr(0,64), patchHash = s.substr(65,64), targetHash = s.substr(130,64);
     Check(Hex(baseHash) && Hex(patchHash) && Hex(targetHash));
     Local(path);
+    for (auto it = models.begin(); it != models.end(); ++it) {
+        if (it->path != path || it->descriptor != s) continue;
+        auto reader = Reader(it->file.get());
+        if (reader) {
+            models.splice(models.begin(), models, it);
+            return reader;
+        }
+        break;
+    }
     auto store = path.parent_path() / L".k1models";
     auto base = Read(store / (baseHash + ".base"), baseHash);
     auto patch = Read(store / (patchHash + ".delta"), patchHash);
@@ -107,6 +142,18 @@ File Restore(FILE* descriptor, const fs::path& path) {
     Check(at == patch.size() && hash.End() == targetHash);
     Check(fflush(file.get()) == 0 && _fseeki64(file.get(), 0, SEEK_SET) == 0);
     fprintf(stderr, "K1_LAZY_MODEL_PASS bytes=%zu chunks=%u\n", total, count);
+    if (total <= CacheLimit) {
+        auto reader = Reader(file.get());
+        if (reader) {
+            while (!models.empty() && (cachedBytes + total > CacheLimit || models.size() >= 64)) {
+                cachedBytes -= models.back().bytes;
+                models.pop_back();
+            }
+            models.push_front({path, std::move(s), total, std::move(file)});
+            cachedBytes += total;
+            return reader;
+        }
+    }
     return file;
 }
 }
@@ -115,13 +162,20 @@ extern "C" FILE* k1_lazy_model_open(FILE* input, const char* path) {
     char magic[5]; size_t got = fread(magic, 1, sizeof magic, input);
     if (got != 5 || memcmp(magic, "KLM1\n", 5)) { rewind(input); return input; }
     File descriptor(input, &fclose);
+    const auto started = GetTickCount64();
     try {
-        // No expanded RAM cache. K12 retains parsed/resident resources itself. Only one
+        // The reuse cache retains temporary file handles, not expanded model RAM. Only one
         // base (<=64MiB), patch (<=64MiB) and target chunk (<=16MiB) at a time here.
         // MSDelta has additional internal scratch allocations. Streams live on disk
         // until their native resource owner closes them; never evict an active stream.
         std::lock_guard<std::mutex> lock(restoreMutex);
-        return Restore(input, fs::u8path(path)).release();
+        auto file = Restore(input, fs::u8path(path));
+        if (getenv("K1_LAZY_TIMING")) {
+            auto name = fs::u8path(path).filename().u8string();
+            fprintf(stderr,"K1_LAZY_MODEL_TIMING resource=%s elapsed_ms=%llu\n",
+                    name.c_str(),GetTickCount64()-started);
+        }
+        return file.release();
     } catch (...) {
         fprintf(stderr, "K1_LAZY_MODEL_FAIL validation_or_io\n");
         return nullptr;
